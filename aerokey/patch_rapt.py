@@ -378,15 +378,66 @@ def detect_kotlin_version(sdk: Path) -> str:
     return DEFAULT_KOTLIN_VERSION
 
 
-def detect_jvm_target(text: str) -> str:
-    """Modülün Java hedefini bulup Kotlin'i aynı hedefe ayarlayabilelim."""
-    match = re.search(r"targetCompatibility\s*=?\s*JavaVersion\.VERSION_(\d+)", text)
-    if match:
-        return match.group(1)
-    match = re.search(r"targetCompatibility\s*=?\s*['\"]?(\d+)", text)
-    if match:
-        return match.group(1)
-    return "17"
+# --- Kotlin/Java JVM hedefi hizalaması ------------------------------------
+#
+# Kotlin ve Java görevleri aynı JVM hedefinde derlemezse Gradle şu hatayla
+# durur:
+#
+#   Inconsistent JVM-target compatibility detected for tasks
+#   'compileReleaseJavaWithJavac' (1.8) and 'compileReleaseKotlin' (17).
+#
+# Bu değeri BURADA, yamalama anında sabit bir sayı olarak yazmak yanlıştı:
+# Ren'Py'nin renpyandroid modülü `compileOptions` bloğunu hiç tanımlamıyor
+# olabilir (bu durumda AGP kendi varsayılanını -- ki 1.8 -- uygular), ya da
+# Ren'Py/AGP sürümleri arasında değişebilir. Dosyayı okuyup tahmin etmek
+# yerine, hizalamayı GRADLE'IN KENDİSİNE yaptırıyoruz: aşağıdaki blok,
+# yapılandırma anında modülün gerçek Java hedefini okuyup Kotlin'i tam
+# olarak ona eşitliyor. Böylece değer ne olursa olsun ikisi asla ayrışamaz.
+JVM_TARGET_BEGIN = f"// {MARKER}-JVMTARGET"
+JVM_TARGET_END = f"// {MARKER}-JVMTARGET-END"
+
+JVM_TARGET_BLOCK = f"""
+{JVM_TARGET_BEGIN}: Kotlin'in JVM hedefini modülün Java hedefiyle eşitler.
+// Sabit bir sürüm numarası YAZMIYORUZ; değeri Gradle yapılandırma anında
+// projenin kendisinden okuyoruz, çünkü Ren'Py bu modülde compileOptions'ı
+// hiç belirtmeyebilir (o zaman AGP varsayılanı geçerli olur) ve bu
+// varsayılan sürümler arasında değişebilir.
+afterEvaluate {{
+    def javaMajor = android.compileOptions.targetCompatibility.majorVersion
+    // Kotlin, Java 8'i "1.8" olarak adlandırır; diğerlerinde sayı aynıdır.
+    def targetName = (javaMajor == "8") ? "1.8" : javaMajor
+    def kotlinTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.fromTarget(targetName)
+    tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {{
+        compilerOptions.jvmTarget.set(kotlinTarget)
+    }}
+}}
+{JVM_TARGET_END}
+"""
+
+# Bu betiğin ESKİ bir sürümünün yazdığı, sabit numaralı blok. Yamamız
+# imza (MARKER) ile korunduğu için, düzeltilmiş sürüm çalıştığında dosya
+# "zaten yamalı" sayılıp bozuk blok olduğu gibi kalırdı; bu yüzden onu
+# açıkça tanıyıp söküyoruz.
+_LEGACY_JVM_BLOCK_RE = re.compile(
+    r"\n*//\s*" + re.escape(MARKER) + r":\s*Kotlin ve Java aynı JVM hedefinde olmalı\.\s*\n"
+    r"kotlin\s*\{\s*\n"
+    r"\s*compilerOptions\s*\{\s*\n"
+    r"\s*jvmTarget\s*=\s*org\.jetbrains\.kotlin\.gradle\.dsl\.JvmTarget\.JVM_\w+\s*\n"
+    r"\s*\}\s*\n"
+    r"\s*\}\s*\n?"
+)
+
+# Bizim güncel bloğumuz (yeniden yazabilmek için sökülür).
+_JVM_BLOCK_RE = re.compile(
+    r"\n*" + re.escape(JVM_TARGET_BEGIN) + r"[\s\S]*?" + re.escape(JVM_TARGET_END) + r"\n?"
+)
+
+
+def _strip_jvm_target_blocks(text: str) -> str:
+    """Daha önce eklenmiş (eski ya da güncel) JVM hedefi bloklarını çıkarır."""
+    text = _LEGACY_JVM_BLOCK_RE.sub("", text)
+    text = _JVM_BLOCK_RE.sub("", text)
+    return text
 
 
 def _gradle_project_roots(sdk: Path) -> list[Path]:
@@ -473,15 +524,29 @@ def patch_root_gradle(sdk: Path, kotlin_version: str) -> bool:
 
 
 def _patch_module_gradle_file(module_gradle: Path) -> bool:
+    """
+    renpyandroid modülünü yamalar ve GEREKİRSE ESKİ YAMAYI ONARIR.
+
+    İkinci kısım önemli: yama imzayla (MARKER) korunduğu için, betiğin eski
+    bir sürümünün yazdığı bozuk bir blok "zaten yamalı" sayılıp sonsuza dek
+    olduğu gibi kalırdı. Bu yüzden Kotlin eklentisi satırını yalnızca bir
+    kez ekliyoruz, ama JVM hedefi bloğunu HER çalıştırmada söküp güncel
+    haliyle yeniden yazıyoruz. Dosya zaten güncelse hiçbir şey yazılmaz.
+    """
     if not module_gradle.is_file():
         raise PatchError(f"renpyandroid/build.gradle bulunamadı: {module_gradle}")
 
-    text = read(module_gradle)
-    if MARKER in text:
-        print(f"[aerokey] Zaten yamalı, atlanıyor: {module_gradle}")
-        return False
+    original = read(module_gradle)
+    text = original
 
-    jvm_target = detect_jvm_target(text)
+    if MARKER in text:
+        text = _strip_jvm_target_blocks(text).rstrip("\n") + "\n" + JVM_TARGET_BLOCK
+        if text == original:
+            print(f"[aerokey] Zaten güncel, atlanıyor: {module_gradle}")
+            return False
+        write(module_gradle, text)
+        print(f"[aerokey] Eski JVM hedefi bloğu güncellendi: {module_gradle}")
+        return True
 
     plugins_match = re.search(r"plugins\s*\{", text)
     if plugins_match:
@@ -519,17 +584,10 @@ def _patch_module_gradle_file(module_gradle: Path) -> bool:
 
     # Kotlin'in JVM hedefini Java'nınkiyle hizala; aksi halde AGP
     # "Inconsistent JVM-target compatibility" hatasıyla derlemeyi durdurur.
-    text += (
-        f"\n\n// {MARKER}: Kotlin ve Java aynı JVM hedefinde olmalı.\n"
-        "kotlin {\n"
-        "    compilerOptions {\n"
-        f"        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_{jvm_target}\n"
-        "    }\n"
-        "}\n"
-    )
+    text = _strip_jvm_target_blocks(text).rstrip("\n") + "\n" + JVM_TARGET_BLOCK
 
     write(module_gradle, text)
-    print(f"[aerokey] Yamalandı (jvmTarget {jvm_target}): {module_gradle}")
+    print(f"[aerokey] Yamalandı: {module_gradle}")
     return True
 
 
