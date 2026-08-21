@@ -23,6 +23,23 @@
   let logBuffer = [];
   let autoScroll = true;
 
+  // Derleme günlüğü binlerce satıra çıkabiliyor (özellikle Gradle/Android
+  // derlemesinin sonunda, çok sayıda satır kısa sürede birden gelince).
+  // Her satırı geldiği anda tek tek DOM'a eklemek — özellikle her seferinde
+  // scrollTop okuyup yazmak — tarayıcıyı sayfa genelinde donma hissi
+  // verecek kadar yorabiliyor. Bunun yerine satırları bir kuyrukta
+  // biriktirip tek bir animasyon karesinde toplu halde ekliyoruz, ve
+  // DOM'daki satır sayısını sınırlı tutuyoruz. Tam günlük (kopyalama ve
+  // sunucudan indirme için) her zaman logBuffer'da / sunucuda eksiksiz
+  // kalır — yalnızca EKRANDA GÖRÜNEN satır sayısı sınırlanıyor.
+  const MAX_RENDERED_LINES = 2500;
+  const BURST_ANIMATION_THRESHOLD = 40;
+  let pendingLines = [];
+  let flushHandle = null;
+  let trimmedCount = 0;
+  let trimNoticeEl = null;
+  let consoleHasContent = false;
+
   // --- Küçük yardımcılar -------------------------------------------------
 
   function toast(message, isBad = false) {
@@ -56,20 +73,91 @@
     return "";
   }
 
+  /** Satırı kuyruğa ekler; gerçek DOM güncellemesi flushLines()'da olur. */
   function appendLine(line) {
-    if (logBuffer.length === 0) consoleEl.innerHTML = "";
     logBuffer.push(line);
+    pendingLines.push(line);
+    if (flushHandle === null) {
+      flushHandle = requestAnimationFrame(flushLines);
+    }
+  }
 
-    const span = document.createElement("span");
-    span.className = "line " + lineClass(line);
-    span.textContent = line || " ";
-    consoleEl.appendChild(span);
+  /**
+   * Kuyruktaki tüm satırları TEK seferde DOM'a yazar.
+   *
+   * Bir DocumentFragment kullanmak, her satır için ayrı ayrı appendChild
+   * çağırmaktan (ve dolayısıyla ayrı ayrı reflow tetiklemekten) kaçınır.
+   * scrollTop da yalnızca bu toplu işlemin SONUNDA bir kez okunup yazılır —
+   * bu, çoğu jank'in asıl kaynağıdır (her satırda scrollTop okumak,
+   * tarayıcıyı senkron bir layout hesabına zorlar).
+   */
+  function flushLines() {
+    flushHandle = null;
+    if (!pendingLines.length) return;
+
+    if (!consoleHasContent) {
+      consoleEl.innerHTML = "";
+      consoleHasContent = true;
+    }
+
+    // Çok sayıda satır tek karede birden gelmişse (derleme sonunda tipik),
+    // her birine giriş animasyonu oynatmak başlı başına bir performans
+    // yüküdür; böyle bir patlamada animasyonu atlayıp anında gösteriyoruz.
+    const skipAnimation = pendingLines.length > BURST_ANIMATION_THRESHOLD;
+
+    const fragment = document.createDocumentFragment();
+    for (const line of pendingLines) {
+      const span = document.createElement("span");
+      span.className = "line " + lineClass(line) + (skipAnimation ? " no-anim" : "");
+      span.textContent = line || " ";
+      fragment.appendChild(span);
+    }
+    pendingLines = [];
+    consoleEl.appendChild(fragment);
+
+    trimRenderedLines();
 
     if (autoScroll) consoleEl.scrollTop = consoleEl.scrollHeight;
   }
 
+  /**
+   * Görünen satır sayısını sınırlı tutar; eskiler DOM'dan atılır (veri
+   * kaybı yok — tam günlük logBuffer'da ve sunucuda duruyor, "Kopyala" ve
+   * "Aç" bu sınırdan etkilenmez).
+   */
+  function trimRenderedLines() {
+    if (consoleEl.childElementCount <= MAX_RENDERED_LINES) return;
+
+    if (!trimNoticeEl) {
+      trimNoticeEl = document.createElement("span");
+      trimNoticeEl.className = "line l-trim-notice";
+      consoleEl.insertBefore(trimNoticeEl, consoleEl.firstChild);
+    }
+
+    // Bildirim satırının hemen ardından gelen (yani en eski) satırları
+    // silip bildirimin kendisini hiç dokunmadan başta tutuyoruz.
+    while (consoleEl.childElementCount > MAX_RENDERED_LINES) {
+      const victim = trimNoticeEl.nextElementSibling;
+      if (!victim) break;
+      consoleEl.removeChild(victim);
+      trimmedCount += 1;
+    }
+
+    trimNoticeEl.textContent =
+      `— performans için ilk ${trimmedCount} satır ekrandan gizlendi ` +
+      `(tam günlük "Kopyala" ya da "Aç" ile eksiksiz) —`;
+  }
+
   function resetConsole() {
+    if (flushHandle !== null) {
+      cancelAnimationFrame(flushHandle);
+      flushHandle = null;
+    }
     logBuffer = [];
+    pendingLines = [];
+    trimmedCount = 0;
+    trimNoticeEl = null;
+    consoleHasContent = false;
     consoleEl.innerHTML =
       '<span class="console-empty">Derleme günlüğü burada canlı olarak akacak.</span>';
     resultsBox.hidden = true;

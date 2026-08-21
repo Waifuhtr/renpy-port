@@ -619,10 +619,23 @@ button { font: inherit; cursor: pointer; }
   to   { opacity: 1; transform: none; }
 }
 
+/* Çok sayıda satır tek seferde eklendiğinde (derleme sonundaki tipik
+   patlama) giriş animasyonunu atlıyoruz — yüzlerce eş zamanlı animasyon
+   başlatmak, önlemeye çalıştığımız donma hissinin kendisine dönüşürdü. */
+.console .line.no-anim { animation: none; }
+
 .console .l-error { color: var(--bad); }
 .console .l-warn { color: var(--warn); }
 .console .l-good { color: var(--good); }
 .console .l-info { color: var(--accent-2); }
+
+.console .l-trim-notice {
+  color: var(--text-mute);
+  font-style: italic;
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px dashed var(--border);
+}
 
 /* --- Sonuçlar ---------------------------------------------------------- */
 
