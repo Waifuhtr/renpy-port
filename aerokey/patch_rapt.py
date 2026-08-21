@@ -70,57 +70,229 @@ class PatchError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 def candidate_bases() -> Iterable[Path]:
-    """renutil'in Ren'Py SDK'larını kurabileceği bilinen dizinler."""
-    env = os.environ.get("RENUTIL_HOME")
-    if env:
-        yield Path(env)
+    """
+    renutil'in Ren'Py SDK'larını kurduğu "registry" dizini adayları.
+
+    renkit'in kendi kaynağına göre (src/renutil.rs, `get_registry`) varsayılan
+    registry `$HOME/.renutil`'dir ve her sürüm onun altında kendi sürüm
+    numarasıyla bir klasöre açılır:
+
+        $HOME/.renutil/8.5.3/rapt/...
+
+    Aşağıdaki diğer yollar yalnızca birer emniyet payıdır; ilki gerçek
+    varsayılandır.
+    """
+    for env_name in ("RENUTIL_REGISTRY", "RENUTIL_HOME"):
+        value = os.environ.get(env_name)
+        if value:
+            yield Path(value)
+
     home = Path.home()
+    yield home / ".renutil"          # renkit'in gerçek varsayılanı
+    yield Path("/root/.renutil")
     yield home / ".local" / "share" / "renutil"
     yield home / ".cache" / "renutil"
-    yield Path("/root/.local/share/renutil")
-    yield Path("/root/.cache/renutil")
 
 
-def find_sdk_roots() -> list[Path]:
-    """İçinde `rapt/` bulunan tüm Ren'Py SDK dizinlerini döner."""
+def _is_sdk_dir(path: Path) -> bool:
+    """
+    Bir dizinin yamalanabilir bir Ren'Py SDK'sı olup olmadığını söyler.
+
+    Yalnızca `rapt/` aramak yetmez: Ren'Py'nin arşivlenmiş eski `rapt`
+    deposunda ve renpy-build kaynak ağacında da `rapt/` vardır ama içinde
+    bizim yamaladığımız `prototype/` şablonu bulunmaz (o düzende doğrudan
+    `project/` işlenir). Böyle bir dizini SDK sanmak, gerçek SDK dururken
+    yamanın yanlış yerde patlamasına yol açar. Bu yüzden ölçütümüz doğrudan
+    ihtiyaç duyduğumuz şey: `rapt/prototype/`.
+    """
+    return (path / "rapt" / "prototype").is_dir()
+
+
+def _has_legacy_rapt(path: Path) -> bool:
+    """`rapt/` var ama desteklemediğimiz eski düzende (prototype yok)."""
+    return (path / "rapt").is_dir() and not (path / "rapt" / "prototype").is_dir()
+
+
+def _is_installed_sdk(path: Path) -> bool:
+    """
+    Otomatik keşifte aradığımız ölçüt: KURULU bir Ren'Py SDK'sı.
+
+    `rapt/prototype/` tek başına yeterli bir imza değil — Ren'Py'nin
+    `renpy-build` kaynak deposunda da o klasör bulunur, ama orası bir SDK
+    değildir ve yamalanması hem anlamsız hem de yanıltıcıdır. Kurulu bir
+    SDK'yı ayıran kesin işaret, kökündeki `renpy.py` giriş noktasıdır;
+    renkit de derlemeyi tam olarak onu çağırarak başlatır.
+
+    Kullanıcı --sdk ile açık bir yol verdiyse bu ek koşulu aramayız: orada
+    ne yaptığını bildiğini varsayarız.
+    """
+    return _is_sdk_dir(path) and (path / "renpy.py").is_file()
+
+
+def _roots_from_candidate_bases() -> list[Path]:
+    """Bilinen registry dizinlerini ve onların birinci seviye alt klasörlerini tarar."""
     found: list[Path] = []
-    seen: set[Path] = set()
-
     for base in candidate_bases():
         if not base.is_dir():
             continue
-        # Hem base'in kendisi hem de tek seviye altındaki sürüm klasörleri.
-        for candidate in [base, *sorted(p for p in base.iterdir() if p.is_dir())]:
+        # Hem base'in kendisi (doğrudan SDK'ya işaret ediyor olabilir) hem de
+        # altındaki sürüm klasörleri (asıl yerleşim budur).
+        try:
+            children = sorted(p for p in base.iterdir() if p.is_dir())
+        except OSError:
+            children = []
+        for candidate in (base, *children):
+            if _is_installed_sdk(candidate):
+                found.append(candidate)
+    return found
+
+
+def _roots_from_renutil() -> list[Path]:
+    """
+    renutil'e kurulumun nerede olduğunu DOĞRUDAN sorar.
+
+    `renutil show <sürüm>` çıktısında "Location: <yol>" satırı bulunur. Yolu
+    tahmin etmek yerine aracın kendisine sormak, renkit ileride varsayılan
+    registry'sini değiştirse bile çalışmayı sürdürmemizi sağlar.
+    """
+    version = os.environ.get("RENPY_VERSION", "").strip()
+    if not version:
+        return []
+
+    try:
+        result = subprocess.run(
+            ["renutil", "show", version],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    found: list[Path] = []
+    for line in (result.stdout or "").splitlines():
+        if line.strip().lower().startswith("location:"):
+            path = Path(line.split(":", 1)[1].strip())
+            if _is_installed_sdk(path):
+                found.append(path)
+    return found
+
+
+# Dosya sistemi taramasında hiç girilmemesi gereken, büyük ve alakasız dallar.
+_SCAN_SKIP_DIRS = {
+    ".git", "__pycache__", "node_modules", "proc", "sys", "dev", "run",
+    "var", "usr", "lib", "lib64", "bin", "sbin", "boot", "media", "mnt",
+    "android-sdk", "gradle-home", ".gradle",
+}
+_SCAN_ROOTS = ("/root", "/home", "/opt", "/srv", "/data", "/app", "/usr/local")
+_SCAN_MAX_DEPTH = 4
+
+
+def _roots_from_filesystem() -> list[Path]:
+    """
+    Son çare: makul kökler altında sınırlı derinlikte bir tarama yapar.
+
+    Bilinen yolların hiçbiri tutmadığında devreye girer; böylece renutil'in
+    kurulum yerini değiştirmesi ya da alışılmadık bir HOME ayarı yamayı
+    tamamen kırmak yerine yalnızca biraz yavaşlatır.
+    """
+    found: list[Path] = []
+    for root in _SCAN_ROOTS:
+        root_path = Path(root)
+        if not root_path.is_dir():
+            continue
+        base_depth = len(root_path.parts)
+        for dirpath, dirnames, _ in os.walk(root_path, followlinks=False):
+            current = Path(dirpath)
+
+            # Eşleşme kontrolü budamadan ÖNCE yapılmalı: azami derinlikteki
+            # bir dizinde dirnames'i boşaltmak, tam orada duran geçerli bir
+            # SDK'yı gözden kaçırmamıza yol açardı.
+            if "rapt" in dirnames and _is_installed_sdk(current):
+                found.append(current)
+                dirnames[:] = []  # SDK'nın içine girmeye gerek yok
+                continue
+
+            if len(current.parts) - base_depth >= _SCAN_MAX_DEPTH:
+                dirnames[:] = []
+            else:
+                dirnames[:] = [d for d in dirnames if d not in _SCAN_SKIP_DIRS]
+    return found
+
+
+def find_sdk_roots() -> list[Path]:
+    """
+    Yamalanabilir tüm Ren'Py SDK dizinlerini bulur.
+
+    Üç katmanlı arama yapar (ucuzdan pahalıya): bilinen registry yolları,
+    renutil'e sorma, sınırlı dosya sistemi taraması. İlk sonuç veren katman
+    kazanır; hiçbiri bulamazsa boş liste döner.
+    """
+    seen: set[Path] = set()
+    result: list[Path] = []
+
+    for layer in (_roots_from_candidate_bases, _roots_from_renutil, _roots_from_filesystem):
+        for path in layer():
             try:
-                resolved = candidate.resolve()
+                resolved = path.resolve()
             except OSError:
                 continue
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            if (resolved / "rapt").is_dir():
-                found.append(resolved)
+            if resolved not in seen:
+                seen.add(resolved)
+                result.append(resolved)
+        if result:
+            break
 
-    return found
+    return result
 
 
 def resolve_sdk(explicit: Optional[str]) -> Path:
     if explicit:
         sdk = Path(explicit).expanduser().resolve()
-        if not (sdk / "rapt").is_dir():
-            raise PatchError(f"{sdk} altında bir 'rapt' klasörü yok — burası bir Ren'Py SDK'sı değil.")
+        if not _is_sdk_dir(sdk):
+            if _has_legacy_rapt(sdk):
+                raise PatchError(
+                    f"{sdk} içinde 'rapt/' var ama 'rapt/prototype/' yok. Bu, "
+                    "desteklemediğimiz eski RAPT düzeni (Ren'Py 7.4 öncesi ya "
+                    "da renpy-build kaynak ağacı). AeroKey yaması Gradle "
+                    "tabanlı güncel şablonu gerektirir."
+                )
+            raise PatchError(
+                f"{sdk} altında bir 'rapt/prototype' klasörü yok — burası bir "
+                "Ren'Py SDK'sı değil."
+            )
         return sdk
 
     roots = find_sdk_roots()
     if not roots:
-        raise PatchError(
-            "Ren'Py SDK bulunamadı. Aranan yerler: "
-            + ", ".join(str(b) for b in candidate_bases())
-            + ". --sdk ile açıkça belirtebilirsiniz."
-        )
+        raise no_sdk_error()
     if len(roots) > 1:
         print(f"[aerokey] {len(roots)} SDK bulundu, hepsi yamalanacak.")
     return roots[0]
+
+
+def no_sdk_error() -> PatchError:
+    """
+    Hiçbir SDK bulunamadığında kullanılacak, tanılamaya yarayan hata.
+
+    Ayrı bir fonksiyon olmasının sebebi, hem tek-SDK hem de --all kod
+    yollarının AYNI ayrıntılı mesajı vermesi; yalnızca "SDK bulunamadı"
+    demek, sorunu ayıklamaya çalışan kişiye hiçbir şey söylemiyordu.
+    """
+    return PatchError(
+        "Ren'Py SDK bulunamadı.\n"
+        "  Bakılan registry yolları: "
+        + ", ".join(str(b) for b in candidate_bases())
+        + "\n  'renutil show $RENPY_VERSION' da bir konum vermedi "
+        f"(RENPY_VERSION={os.environ.get('RENPY_VERSION', '<tanımsız>')}).\n"
+        "  Şu kökler altında tarama da sonuç vermedi: "
+        + ", ".join(_SCAN_ROOTS)
+        + "\n  Aranan imza: <dizin>/rapt/prototype/ VE <dizin>/renpy.py "
+        "(ikisi birden). İçinde yalnızca 'rapt/' olan dizinler kasıtlı "
+        "atlanır — eski RAPT düzeni ve renpy-build kaynak ağacı böyledir.\n"
+        "  Önce 'renutil install <sürüm>' çalıştırıldığından emin olun, "
+        "ya da --sdk <yol> ile konumu açıkça belirtin."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -647,7 +819,7 @@ def main(argv: list[str]) -> int:
         if args.all and not args.sdk:
             sdks = find_sdk_roots()
             if not sdks:
-                raise PatchError("Yamalanacak SDK bulunamadı.")
+                raise no_sdk_error()
         else:
             sdks = [resolve_sdk(args.sdk)]
 
