@@ -339,6 +339,53 @@ def kotlin_target_dirs(sdk: Path) -> list[Path]:
     return targets
 
 
+def asset_target_dirs(sdk: Path) -> list[Path]:
+    """
+    Afiş görselinin kopyalanacağı assets klasörleri.
+
+    `renpyandroid` modülünün assets'ini kullanıyoruz, `app` modülünün
+    değil: `app/src/main/assets/` Ren'Py'nin oyun arşivini koyduğu yerdir ve
+    her derlemede yeniden üretilir — oraya dosya koymak kırılgan olurdu.
+    Kütüphane modülünün assets'i ise APK'ya olduğu gibi birleştirilir.
+    """
+    targets = []
+    for module_root in _gradle_project_roots(sdk):
+        targets.append(module_root / "renpyandroid" / "src" / "main" / "assets")
+    return targets
+
+
+# Afiş her derlemede değişebildiği için sabit bir tabanla saklıyoruz;
+# uzantı kaynağa göre belirlenir (ImageDecoder içeriğe bakar, ama uzantıyı
+# korumak dosyayı elle incelerken işi kolaylaştırır).
+BANNER_STEM = "aerokey_banner"
+
+
+def install_banner(sdk: Path, source: Optional[Path]) -> Optional[str]:
+    """
+    Giriş ekranı afişini APK assets'ine kopyalar.
+
+    Her çağrıda önce eski afişler temizlenir; böylece afiş kaldırıldığında
+    APK'da bayat bir kopya kalmaz. Kaynak yoksa None döner ve giriş ekranı
+    afişsiz çizilir.
+    """
+    asset_name: Optional[str] = None
+
+    for target in asset_target_dirs(sdk):
+        target.mkdir(parents=True, exist_ok=True)
+        for stale in target.glob(f"{BANNER_STEM}.*"):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+
+        if source is not None and source.is_file():
+            suffix = source.suffix.lower() or ".gif"
+            asset_name = f"{BANNER_STEM}{suffix}"
+            shutil.copy2(source, target / asset_name)
+
+    return asset_name
+
+
 def install_kotlin_sources(sdk: Path) -> int:
     if not KOTLIN_SOURCE_DIR.is_dir():
         raise PatchError(f"Kotlin kaynak klasörü bulunamadı: {KOTLIN_SOURCE_DIR}")
@@ -768,6 +815,8 @@ def render_config(values: dict) -> str:
         "KEY_PAGE_URL": "https://riaslink.fun/bilgi",
         "GAME_ID": "riaslink_oyun_001",
         "GAME_TITLE": "Ren'Py Game",
+        "HAS_BANNER": False,
+        "BANNER_ASSET": "aerokey_banner.gif",
         "FEATURE_LEADERBOARD": False,
         "FEATURE_SURVEY": False,
         "FEATURE_PROFILE": False,
@@ -784,6 +833,8 @@ def render_config(values: dict) -> str:
         "KEY_PAGE_URL": "String",
         "GAME_ID": "String",
         "GAME_TITLE": "String",
+        "HAS_BANNER": "Boolean",
+        "BANNER_ASSET": "String",
         "FEATURE_LEADERBOARD": "Boolean",
         "FEATURE_SURVEY": "Boolean",
         "FEATURE_PROFILE": "Boolean",
@@ -806,7 +857,9 @@ def render_config(values: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def stamp_config(sdk: Path, values: dict) -> list[Path]:
+def stamp_config(
+    sdk: Path, values: dict, banner_source: Optional[Path] = None
+) -> list[Path]:
     """
     Derlemeye özel AeroKeyConfig.kt dosyasını, ilgili TÜM konumlara yazar.
 
@@ -815,6 +868,15 @@ def stamp_config(sdk: Path, values: dict) -> list[Path]:
     güncellenmelidir; yalnızca birine yazmak eski yapılandırmayla derleme
     yapılmasına yol açar.
     """
+    # Afişi kur ve sonucu yapılandırmaya yansıt: hangi dosyanın gerçekten
+    # paketlendiğini tek yerden bilmek, Kotlin tarafının var olmayan bir
+    # varlığı açmaya çalışmasını engeller.
+    asset_name = install_banner(sdk, banner_source)
+    values = dict(values or {})
+    values["HAS_BANNER"] = asset_name is not None
+    if asset_name:
+        values["BANNER_ASSET"] = asset_name
+
     content = render_config(values)
     written: list[Path] = []
     for target_dir in kotlin_target_dirs(sdk):

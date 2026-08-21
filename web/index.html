@@ -162,6 +162,17 @@
           </small>
         </div>
 
+        <label class="field">
+          <span class="label">Giriş ekranı afişi (isteğe bağlı)</span>
+          <input type="file" id="banner" name="banner" accept="image/*,.gif">
+          <small class="hint">
+            <b>500×288</b> için tasarlanmıştır; oran korunarak sığdırılır.
+            GIF yüklerseniz Android 9+ üzerinde hareketli oynatılır.
+            Boş bırakırsanız Space'e gömülü <code>banner.gif</code> (varsa)
+            kullanılır, o da yoksa ekran afişsiz çizilir.
+          </small>
+        </label>
+
         <div class="callout">
           <strong>Not</strong> AeroKey açıkken <code>INTERNET</code> izni
           <code>android.json</code> dosyasına otomatik eklenir. Cihaz kimliği

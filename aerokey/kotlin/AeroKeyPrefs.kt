@@ -110,6 +110,23 @@ internal object AeroKeyPrefs {
         prefs(context).edit().putString(K_USERNAME, clean).apply()
     }
 
+    private const val K_USERNAME_CHOSEN = "username_chosen"
+
+    /**
+     * Oyuncu sıralama adını KENDİSİ seçti mi?
+     *
+     * Ayrı bir bayrak tutuyoruz; "ad varsayılandan farklı mı" diye bakmak
+     * yeterli değil, çünkü ad buluttan da gelebiliyor (/sync yanıtı) ve o
+     * durumda oyuncuya hiç sorulmamış oluyor. Bir kez seçildikten sonra
+     * cihaz kimliğine bağlı olarak kalıcıdır, bir daha sorulmaz.
+     */
+    fun usernameChosen(context: Context): Boolean =
+        prefs(context).getBoolean(K_USERNAME_CHOSEN, false)
+
+    fun markUsernameChosen(context: Context) {
+        prefs(context).edit().putBoolean(K_USERNAME_CHOSEN, true).apply()
+    }
+
     // --- Oynama süreleri -------------------------------------------------
 
     fun totalSeconds(context: Context): Long =

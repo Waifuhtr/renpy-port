@@ -98,6 +98,14 @@ COPY web/ /app/web/
 # BAŞARISIZ yapar).
 COPY icon.* /app/icon_source/
 
+# --- (İsteğe bağlı) AeroKey giriş ekranı afişi ----------------------------
+# Bu repoya banner.gif (ya da .png/.jpg/.webp) eklerseniz, AeroKey giriş
+# ekranının üstünde afiş olarak gösterilir. Tasarım boyutu 500x288'dir;
+# oran korunarak karta sığdırılır. GIF ise Android 9+ üzerinde hareketli
+# oynatılır. icon.* ile aynı gerekçeyle burada da bir placeholder var:
+# hiçbir dosyayla eşleşmeyen bir COPY deseni Docker build'ini BAŞARISIZ yapar.
+COPY banner.* /app/banner_source/
+
 # Kalıcı veri (imza anahtarı + oyun kimliği kaydı) için varsayılan konum.
 # Hugging Face'te kalıcı disk açıksa /data kullanılır; değilse uygulama
 # otomatik olarak yazılabilir bir yedeğe düşer ve arayüzde uyarır.

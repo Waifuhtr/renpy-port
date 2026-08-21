@@ -525,6 +525,8 @@ def _ensure_android_json(
 
 
 _ICON_SOURCE_DIR = Path("/app/icon_source")
+_BANNER_SOURCE_DIR = Path("/app/banner_source")
+_BANNER_EXTENSIONS = (".gif", ".png", ".jpg", ".jpeg", ".webp")
 _ICON_CANVAS = 432
 _ICON_SAFE_RATIO = 0.66  # Android adaptif ikon güvenli alanına kaba bir yaklaşım
 
@@ -535,6 +537,24 @@ def _find_bundled_icon() -> Optional[Path]:
         return None
     for name in ("icon.png", "icon.jpg", "icon.jpeg", "icon.PNG", "icon.JPG"):
         candidate = _ICON_SOURCE_DIR / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _find_bundled_banner() -> Optional[Path]:
+    """
+    Dockerfile'in /app/banner_source/ altina kopyaladigi, depoya eklenmis
+    afis gorseli (banner.gif / .png / ...). Yoksa None doner ve giris ekrani
+    afissiz cizilir.
+    """
+    if not _BANNER_SOURCE_DIR.is_dir():
+        return None
+    for ext in _BANNER_EXTENSIONS:
+        candidate = _BANNER_SOURCE_DIR / f"banner{ext}"
+        if candidate.is_file():
+            return candidate
+        candidate = _BANNER_SOURCE_DIR / f"banner{ext.upper()}"
         if candidate.is_file():
             return candidate
     return None
@@ -924,7 +944,9 @@ def _sdk_roots() -> list[Path]:
         return []
 
 
-def stamp_aerokey_config(values: dict) -> list[str]:
+def stamp_aerokey_config(
+    values: dict, banner_source: Optional[Path] = None
+) -> list[str]:
     """
     AeroKey yapılandırmasını, kurulu TÜM Ren'Py SDK'larına damgalar.
 
@@ -946,7 +968,7 @@ def stamp_aerokey_config(values: dict) -> list[str]:
         try:
             # Yama zaten uygulanmışsa fonksiyonlar kendiliğinden atlar.
             patch_rapt.apply_all(sdk, skip_gradle_warm=True)
-            for path in patch_rapt.stamp_config(sdk, values):
+            for path in patch_rapt.stamp_config(sdk, values, banner_source):
                 written.append(str(path))
         except patch_rapt.PatchError as exc:
             raise RuntimeError(f"{sdk} yamalanamadı: {exc}") from exc
@@ -1046,6 +1068,7 @@ class BuildRequest:
     """Arayüzden gelen, tek bir derlemeyi tanımlayan tüm girdiler."""
     zip_path: Path
     icon_path: Optional[Path]
+    banner_path: Optional[Path]
     keystore_path: Optional[Path]
     renpy_version: str
     want_apk: bool
@@ -1090,7 +1113,9 @@ def run_build(job: BuildJob, req: BuildRequest) -> None:
         if job.status == "running":
             job.status = "error"
         shutil.rmtree(job_dir, ignore_errors=True)
-        for temp_input in (req.zip_path, req.icon_path, req.keystore_path):
+        for temp_input in (
+            req.zip_path, req.icon_path, req.banner_path, req.keystore_path
+        ):
             if temp_input is not None:
                 try:
                     Path(temp_input).unlink(missing_ok=True)
@@ -1196,10 +1221,17 @@ def _execute_build(
     # --- AeroKey ---------------------------------------------------------
     if req.aerokey_enabled:
         game_id, id_note = assign_game_id(identity.package, req.aerokey_game_id)
+        banner_source = req.banner_path or _find_bundled_banner()
+        if banner_source is None:
+            banner_note = "yok (giriş ekranı afişsiz çizilecek)"
+        else:
+            origin = "bu derleme için yüklendi" if req.banner_path else "Space imajına gömülü"
+            banner_note = f'"{banner_source.name}" ({origin})'
         job.log(
             f"\nAeroKey lisans ekranı ETKİN.\n"
             f"  - sunucu   : {req.aerokey_base_url}\n"
-            f'  - oyun_id  : "{game_id}"  ({id_note})'
+            f'  - oyun_id  : "{game_id}"  ({id_note})\n'
+            f"  - afiş     : {banner_note}"
         )
         try:
             stamp_aerokey_config(
@@ -1213,7 +1245,8 @@ def _execute_build(
                     "FEATURE_SURVEY": req.aerokey_survey,
                     "FEATURE_PROFILE": req.aerokey_profile,
                     "FEATURE_BUG_REPORT": req.aerokey_bug_report,
-                }
+                },
+                banner_source=banner_source,
             )
         except RuntimeError as exc:
             job.log(f"Hata: AeroKey entegrasyonu uygulanamadı.\n{exc}")
@@ -1492,6 +1525,7 @@ async def api_auto_keystore_info() -> JSONResponse:
 async def api_build(
     project_zip: UploadFile = File(...),
     icon: Optional[UploadFile] = File(None),
+    banner: Optional[UploadFile] = File(None),
     keystore: Optional[UploadFile] = File(None),
     renpy_version: str = Form(DEFAULT_RENPY_VERSION),
     want_apk: str = Form("true"),
@@ -1530,11 +1564,13 @@ async def api_build(
         raise HTTPException(status_code=400, detail="Bir Ren'Py proje ZIP dosyası yükleyin.")
 
     icon_path = await _save_upload(icon, ".img")
+    banner_path = await _save_upload(banner, ".gif")
     keystore_path = await _save_upload(keystore, ".keystore")
 
     request = BuildRequest(
         zip_path=zip_path,
         icon_path=icon_path,
+        banner_path=banner_path,
         keystore_path=keystore_path,
         renpy_version=version,
         want_apk=apk,

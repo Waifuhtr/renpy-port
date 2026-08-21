@@ -1,0 +1,6 @@
+Bu dosya, Dockerfile'daki 'COPY banner.*' deseninin hicbir dosyayla
+eslesmemesini (ve boylece Docker build'in basarisiz olmasini) onler.
+
+AeroKey giris ekranina afis koymak icin bu klasore banner.gif (ya da
+banner.png / banner.jpg / banner.webp) ekleyin. Tasarim boyutu 500x288.
+GIF ise Android 9 ve uzerinde hareketli oynatilir.

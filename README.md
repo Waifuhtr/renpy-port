@@ -140,6 +140,7 @@ ile yazılmış bir lisans geçidi olur. Doğrulama geçilmeden oyun başlamaz.
 
 ### Giriş ekranında neler var
 
+- İsteğe bağlı **afiş** (aşağıya bakın)
 - **Erişim anahtarı** girişi → `GET /wp-json/lisans/v1/kontrol?anahtar=…`
 - **⭐ VIP Üyeyim** → `GET /wp-json/lisans/v1/vip-kontrol?device_id=…`
 - **🔑 Anahtar Al** → tarayıcıda `https://riaslink.fun/bilgi` sayfasını açar
@@ -148,6 +149,36 @@ ile yazılmış bir lisans geçidi olur. Doğrulama geçilmeden oyun başlamaz.
 Giriş ekranının tek işi doğrulamadır. Liderlik/profil/anket/hata bildirimi
 burada değil, aşağıdaki oyun içi menüdedir — oyuncu bunlara oyun sırasında
 ihtiyaç duyar, henüz oyuna girmeden değil.
+
+### 🖼️ Giriş ekranı afişi
+
+Giriş ekranının üstünde bir görsel gösterebilirsiniz. Tasarım boyutu
+**500×288**; oran korunarak karta sığdırılır.
+
+- **Space'e kalıcı eklemek için:** bu depoya `banner.gif` (ya da
+  `banner.png` / `banner.jpg` / `banner.webp`) ekleyip Space'i yeniden build
+  alın. `banner.placeholder` dosyasını **silmeyin** — `icon.placeholder` ile
+  aynı gerekçe: hiçbir dosyayla eşleşmeyen bir `COPY` deseni Docker build'ini
+  başarısız yapar.
+- **Sadece bir derleme için:** arayüzdeki "İkon ve imzalama → Giriş ekranı
+  afişi" alanından yükleyin; gömülü olanın yerine geçer.
+- **GIF** yüklerseniz Android 9 (API 28) ve üzerinde **hareketli** oynatılır.
+  Daha eski sürümlerde ilk kare durağan gösterilir — sırf afiş için projeye
+  yeni bir GIF kütüphanesi eklemektense bu tercih edildi.
+- Afiş yoksa ekran afişsiz çizilir; hiçbir şey bozulmaz.
+
+### 🏷️ Sıralama adı (zorunlu, tek seferlik)
+
+Lisans doğrulandıktan sonra, oyuncu **ilk kez** giriyorsa bir ad seçme
+ekranı çıkar (3-20 karakter, atlanamaz). Sebebi basit: liderlik tablosu
+adlarla çalışıyor ve herkesin `GizemliOyuncu` görünmesi tabloyu anlamsız
+kılardı.
+
+Seçilen ad **cihaz kimliğine bağlı olarak kalıcı** saklanır ve `POST /sync`
+ile sunucudaki kayda işlenir; bir daha sorulmaz. Ağ o an kopuksa oyuncu
+bekletilmez — ad yerelde durur ve ilk başarılı senkronda sunucuya gider.
+
+Ardından kısa bir **"İyi oyunlar!"** ekranı gösterilip oyun başlatılır.
 
 ### 🎮 Oyun içi yüzen menü
 
@@ -170,11 +201,22 @@ Oyun yatay çalıştığı için menü de yatay düzende tasarlandı.
   yani menü oyun kontrollerini engellemez (panel açıkken hariç; o sırada
   arka planı karartan perde dokunuşları yakalar ve panel kapanır).
 
-Teknik not: sistem seviyesinde bir pencere (`TYPE_APPLICATION_OVERLAY`)
-kullanılmıyor — o, kullanıcıdan "diğer uygulamaların üzerinde göster" izni
-istemeyi gerektirirdi. Menü doğrudan oyunun kendi Activity'sinin içerik
-köküne ekleniyor, yani **hiçbir ek izin gerekmiyor** ve menü yalnızca oyun
-ekranındayken görünüyor.
+Teknik not: menü, `WindowManager` üzerinden **kendi penceresinde** yaşıyor
+(`TYPE_APPLICATION_PANEL` — Activity'mizin penceresine bağlı bir *alt*
+pencere). Bunun iki nedeni var:
+
+1. **Hiçbir izin gerekmiyor.** "Diğer uygulamaların üzerinde göster"
+   (`SYSTEM_ALERT_WINDOW`) izni yalnızca `TYPE_APPLICATION_OVERLAY` için
+   gerekir; onu kullanmıyoruz.
+2. **Ren'Py oyunu bir `SurfaceView` ile çiziliyor** ve SurfaceView, pencere
+   yüzeyinde saydam bir "delik" açıyor. Menü ilk sürümde Activity'nin görünüm
+   ağacına ekleniyordu ve baloncuk sürüklenince kayboluyordu: o deliğin
+   üstündeki görünümler yalnızca yeniden çizilen bölgelerde güvenilir şekilde
+   birleştiriliyor. Ayrı bir pencereyi taşımak ise bir birleştirici
+   (compositor) işlemi olduğundan bu sorunu tamamen ortadan kaldırıyor.
+
+Pencereler tam olarak içerikleri kadar büyük ve `FLAG_NOT_TOUCH_MODAL`
+taşıyor, yani **dışlarındaki dokunuşlar doğrudan oyuna gidiyor**.
 
 ### Her zaman etkin olanlar
 

@@ -29,6 +29,13 @@ internal object AeroKeyConfig {
     /** Giriş ekranında gösterilecek oyun adı. */
     const val GAME_TITLE: String = "Ren'Py Game"
 
+    // --- Giriş ekranı afişi ----------------------------------------------
+    /** Giriş ekranının üstünde bir afiş görseli var mı? */
+    const val HAS_BANNER: Boolean = false
+
+    /** Afişin APK assets klasöründeki adı (HAS_BANNER true ise anlamlı). */
+    const val BANNER_ASSET: String = "aerokey_banner.gif"
+
     // --- İsteğe bağlı paneller ------------------------------------------
     const val FEATURE_LEADERBOARD: Boolean = false
     const val FEATURE_SURVEY: Boolean = false

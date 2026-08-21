@@ -2,12 +2,18 @@ package com.riaslink.aerokey
 
 import android.animation.ValueAnimator
 import android.content.Context
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ImageDecoder
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.RadialGradient
 import android.graphics.Shader
+import android.graphics.SweepGradient
+import android.graphics.drawable.AnimatedImageDrawable
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.graphics.drawable.StateListDrawable
@@ -341,6 +347,111 @@ private fun rippleWrap(base: GradientDrawable, context: Context): android.graphi
     } else {
         StateListDrawable().apply { addState(intArrayOf(), base) }
     }
+
+/**
+ * Giriş ekranındaki afiş (banner) görselini yükler.
+ *
+ * Görsel, APK'nın assets klasörüne paketleyici tarafından konur. GIF ise
+ * API 28+ üzerinde HAREKETLİ olarak oynatılır (ImageDecoder ->
+ * AnimatedImageDrawable); daha eski sürümlerde animasyon için ek bir
+ * kütüphane gerekeceğinden ilk kare durağan olarak gösterilir — bu, sırf
+ * afiş için projeye yeni bir bağımlılık eklemekten iyidir.
+ *
+ * Afiş yoksa ya da çözülemezse null döner ve ekran onsuz çizilir.
+ */
+internal fun Context.loadBannerDrawable(): Drawable? {
+    if (!AeroKeyConfig.HAS_BANNER) return null
+    val name = AeroKeyConfig.BANNER_ASSET
+    if (name.isBlank()) return null
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        try {
+            val source = ImageDecoder.createSource(assets, name)
+            val drawable = ImageDecoder.decodeDrawable(source)
+            (drawable as? AnimatedImageDrawable)?.apply {
+                repeatCount = AnimatedImageDrawable.REPEAT_INFINITE
+                start()
+            }
+            return drawable
+        } catch (_: Exception) {
+            // Aşağıdaki durağan çözümlemeye düşeriz.
+        }
+    }
+
+    return try {
+        assets.open(name).use { stream ->
+            BitmapFactory.decodeStream(stream)?.let { BitmapDrawable(resources, it) }
+        }
+    } catch (_: Exception) {
+        null
+    }
+}
+
+/**
+ * Kartın çevresinde yavaşça dönen gradyan bir kenarlık çizer.
+ *
+ * Giriş ekranını sade bir kutudan çıkarıp canlı hale getiren asıl öğe bu:
+ * SweepGradient'i sürekli döndürerek kenarlıkta dolaşan bir ışık etkisi
+ * elde ediyoruz.
+ */
+internal class GlowBorderView(context: Context) : View(context) {
+
+    private val strokeWidthPx = context.dp(1.6).toFloat()
+    private val cornerPx = context.dp(24).toFloat()
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = strokeWidthPx
+    }
+    private val matrix = android.graphics.Matrix()
+    private var sweep: SweepGradient? = null
+    private var angle = 0f
+
+    private val animator = ValueAnimator.ofFloat(0f, 360f).apply {
+        duration = 6000L
+        repeatCount = ValueAnimator.INFINITE
+        interpolator = LinearInterpolator()
+        addUpdateListener {
+            angle = it.animatedValue as Float
+            invalidate()
+        }
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (!animator.isStarted) animator.start()
+    }
+
+    override fun onDetachedFromWindow() {
+        animator.cancel()
+        super.onDetachedFromWindow()
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        if (w > 0 && h > 0) {
+            sweep = SweepGradient(
+                w / 2f, h / 2f,
+                intArrayOf(
+                    Color.parseColor("#0022D3EE"), Palette.accentAlt, Palette.accent,
+                    Palette.accentWarm, Color.parseColor("#0022D3EE")
+                ),
+                floatArrayOf(0f, 0.22f, 0.45f, 0.68f, 1f)
+            )
+        }
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val shader = sweep ?: return
+        matrix.setRotate(angle, width / 2f, height / 2f)
+        shader.setLocalMatrix(matrix)
+        paint.shader = shader
+
+        val inset = strokeWidthPx / 2f
+        canvas.drawRoundRect(
+            inset, inset, width - inset, height - inset, cornerPx, cornerPx, paint
+        )
+    }
+}
 
 /** Dikey liste düzeni için kısa yol. */
 internal fun Context.column(): LinearLayout = LinearLayout(this).apply {

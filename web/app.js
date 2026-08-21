@@ -333,6 +333,7 @@
     data.append("project_zip", zipInput.files[0]);
 
     if ($("icon").files[0]) data.append("icon", $("icon").files[0]);
+    if ($("banner").files[0]) data.append("banner", $("banner").files[0]);
     if ($("keystore").files[0]) data.append("keystore", $("keystore").files[0]);
 
     const textFields = [

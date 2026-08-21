@@ -8,7 +8,9 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Shader
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
@@ -19,6 +21,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -45,6 +48,7 @@ class AeroKeyGateActivity : Activity() {
     }
 
     private lateinit var root: FrameLayout
+    private lateinit var cardFrame: FrameLayout
     private lateinit var card: LinearLayout
     private lateinit var statusText: TextView
     private lateinit var keyInput: EditText
@@ -103,22 +107,47 @@ class AeroKeyGateActivity : Activity() {
 
         val holder = column().apply { gravity = Gravity.CENTER_HORIZONTAL }
 
-        holder.addView(buildHeader())
-        holder.addSpace(dp(26))
+        val banner = buildBanner()
+        if (banner != null) {
+            holder.addView(banner)
+            holder.addSpace(dp(20))
+        }
 
+        holder.addView(buildHeader())
+        holder.addSpace(dp(22))
+
+        // Kart, dönen gradyan kenarlığın üstünde durur: cam yüzey + canlı
+        // çerçeve birlikte, sade bir kutu yerine derinlikli bir yüzey verir.
         card = column().apply {
-            background = glassCard(this@AeroKeyGateActivity)
             setPadding(dp(24), dp(26), dp(24), dp(26))
         }
         buildCardContent(card)
+
+        cardFrame = FrameLayout(this).apply {
+            background = glassCard(this@AeroKeyGateActivity)
+            addView(
+                GlowBorderView(this@AeroKeyGateActivity),
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+            addView(
+                card,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
         holder.addView(
-            card,
+            cardFrame,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
             )
         )
 
-        holder.addSpace(dp(18))
+        holder.addSpace(dp(14))
+        holder.addView(buildTrustRow())
+        holder.addSpace(dp(14))
         holder.addView(buildDeviceIdChip())
 
         // Liderlik / profil / anket / hata bildirimi burada DEĞİL: bunlar
@@ -146,6 +175,78 @@ class AeroKeyGateActivity : Activity() {
             holder.getChildAt(i).enterWithFade(delay)
             delay += 70L
         }
+    }
+
+    /**
+     * Giriş ekranını süsleyen afiş (500x288 tasarlanmıştır).
+     *
+     * Görsel APK'nın assets klasöründen gelir; yoksa null döneriz ve ekran
+     * afişsiz çizilir — yani afiş tamamen isteğe bağlıdır.
+     */
+    private fun buildBanner(): View? {
+        val drawable = loadBannerDrawable() ?: return null
+
+        val image = ImageView(this).apply {
+            setImageDrawable(drawable)
+            // 500x288 oranını koruyup kartın genişliğine sığdırıyoruz.
+            adjustViewBounds = true
+            scaleType = ImageView.ScaleType.FIT_CENTER
+        }
+
+        // Afişin köşeleri kartlarla aynı yuvarlaklıkta olsun diye bir
+        // çerçeveye alıyoruz; ayrıca ince bir kenarlık afişi arka plandan
+        // ayırıyor.
+        val frame = FrameLayout(this).apply {
+            background = GradientDrawable().apply {
+                cornerRadius = dp(18).toFloat()
+                setColor(Color.parseColor("#3D0D1226"))
+                setStroke(dp(1), Palette.surfaceBorder)
+            }
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                clipToOutline = true
+            }
+            addView(
+                image,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+
+        return frame.apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+    }
+
+    /** Kartın altındaki küçük güven rozetleri — ekrana doku katar. */
+    private fun buildTrustRow(): View {
+        val wrap = row().apply { gravity = Gravity.CENTER }
+        for ((index, badge) in listOf(
+            "🔒 Güvenli doğrulama",
+            "⏱ Süre takibi",
+            "☁ Bulut kaydı"
+        ).withIndex()) {
+            wrap.addView(TextView(this).apply {
+                text = badge
+                setTextColor(Palette.textMuted)
+                textSize = 10.5f
+                gravity = Gravity.CENTER
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(9).toFloat()
+                    setColor(Color.parseColor("#0FFFFFFF"))
+                }
+                setPadding(dp(9), dp(6), dp(9), dp(6))
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { if (index > 0) leftMargin = dp(7) }
+            })
+        }
+        return wrap
     }
 
     private fun buildHeader(): View {
@@ -386,26 +487,185 @@ class AeroKeyGateActivity : Activity() {
         }
     }
 
-    /** Doğrulama başarılı: kısa bir onay animasyonundan sonra oyuna geç. */
+    /**
+     * Doğrulama başarılı.
+     *
+     * Oyuncu sıralama adını henüz seçmediyse önce onu isteriz (zorunlu
+     * adım); seçtiyse doğrudan uğurlama ekranına geçeriz.
+     */
     private fun onAccessGranted(expiresText: String) {
         AeroKeySession.onLicenseVerified()
 
         val message = if (expiresText.isBlank()) {
-            "Erişim onaylandı. İyi oyunlar!"
+            "Erişim onaylandı."
         } else {
             "Erişim onaylandı • $expiresText"
         }
         showStatus(message, Palette.success)
 
-        card.animate()
+        cardFrame.animate()
             .scaleX(1.02f).scaleY(1.02f)
             .setDuration(180)
             .withEndAction {
-                card.animate().scaleX(1f).scaleY(1f).setDuration(160).start()
+                cardFrame.animate().scaleX(1f).scaleY(1f).setDuration(160).start()
             }
             .start()
 
-        root.postDelayed({ launchGame() }, 700)
+        root.postDelayed({
+            if (AeroKeyPrefs.usernameChosen(this)) showFarewell() else showUsernameStep()
+        }, 620)
+    }
+
+    // --- Kullanıcı adı adımı ---------------------------------------------
+
+    /**
+     * Sıralamaya girebilmek için kullanıcı adı seçtiren ZORUNLU adım.
+     *
+     * Atlanamaz: liderlik tablosu adlarla çalışıyor ve herkesin
+     * "GizemliOyuncu" olarak görünmesi tabloyu anlamsız kılardı. Seçilen ad
+     * cihaz kimliğine bağlı olarak kalıcı kaydedilir; bir daha sorulmaz.
+     */
+    private fun showUsernameStep() {
+        card.removeAllViews()
+
+        card.addView(sectionLabel("SIRALAMA ADI"))
+        card.addSpace(dp(10))
+        card.addView(TextView(this).apply {
+            text = "Kendine bir isim seç"
+            setTextColor(Palette.textPrimary)
+            textSize = 20f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        })
+        card.addSpace(dp(6))
+        card.addView(bodyText(
+            "Bu ad liderlik tablosunda ve profilinde görünecek. " +
+                "Cihazına kalıcı olarak kaydedilir, bir daha sorulmaz."
+        ))
+        card.addSpace(dp(14))
+
+        val nameInput = styledInput("örn. GölgeAvcısı").apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            val current = AeroKeyPrefs.username(this@AeroKeyGateActivity)
+            if (current != AeroKeyPrefs.DEFAULT_USERNAME) setText(current)
+        }
+        card.addView(
+            nameInput,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        card.addSpace(dp(8))
+
+        val hint = bodyText("3-20 karakter.", 12f)
+        card.addView(hint)
+        card.addSpace(dp(14))
+
+        val saveButton = primaryButton("Kaydet ve Başla").apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        card.addView(saveButton)
+
+        saveButton.setOnClickListener {
+            val name = nameInput.text.toString().trim()
+            when {
+                name.length < 3 -> {
+                    hint.setTextColor(Palette.danger)
+                    hint.text = "Ad en az 3 karakter olmalı."
+                    shake(nameInput)
+                }
+                name.length > 20 -> {
+                    hint.setTextColor(Palette.danger)
+                    hint.text = "Ad en fazla 20 karakter olabilir."
+                    shake(nameInput)
+                }
+                else -> {
+                    hideKeyboard()
+                    saveButton.isEnabled = false
+                    hint.setTextColor(Palette.textSecondary)
+                    hint.text = "Kaydediliyor…"
+                    registerUsername(name)
+                }
+            }
+        }
+
+        card.enterWithFade(0)
+    }
+
+    /**
+     * Adı yerelde saklar ve sunucudaki kayda işler.
+     *
+     * Ağ hatası burada oyuncuyu DURDURMAZ: ad yerelde saklanmıştır ve bir
+     * sonraki başarılı senkronda sunucuya gider. Oyuncuyu, kendi oyununa
+     * girerken geçici bir bağlantı sorunu yüzünden bekletmek doğru olmaz.
+     */
+    private fun registerUsername(name: String) {
+        AeroKeyPrefs.setUsername(this, name)
+        AeroKeyPrefs.markUsernameChosen(this)
+
+        val deviceId = AeroKeyPrefs.deviceId(this)
+        val achievements = AeroKeyPrefs.achievementsRaw(this)
+        val total = AeroKeySession.currentTotalSeconds(this)
+        val game = AeroKeySession.currentGameSeconds(this)
+
+        AeroKeyAsync.run({
+            AeroKeyApi.sync(
+                deviceId, name, total, AeroKeyConfig.GAME_ID, game, achievements
+            )
+        }) {
+            if (!isFinishing) showFarewell()
+        }
+    }
+
+    // --- Uğurlama ---------------------------------------------------------
+
+    /** Oyuna geçmeden önceki kısa "İyi oyunlar!" ekranı. */
+    private fun showFarewell() {
+        card.removeAllViews()
+
+        card.addView(TextView(this).apply {
+            text = "✓"
+            setTextColor(Palette.success)
+            textSize = 40f
+            gravity = Gravity.CENTER
+        })
+        card.addSpace(dp(6))
+
+        val title = TextView(this).apply {
+            text = "İyi oyunlar!"
+            textSize = 30f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setTextColor(Palette.textPrimary)
+            post {
+                if (width > 0) {
+                    paint.shader = LinearGradient(
+                        0f, 0f, width.toFloat(), 0f,
+                        intArrayOf(Palette.accentAlt, Palette.accent, Palette.accentWarm),
+                        null, Shader.TileMode.CLAMP
+                    )
+                    invalidate()
+                }
+            }
+        }
+        card.addView(title)
+        card.addSpace(dp(8))
+
+        card.addView(bodyText(
+            "${AeroKeyPrefs.username(this)} olarak giriş yaptın.\n" +
+                "${AeroKeyConfig.GAME_TITLE} başlatılıyor…"
+        ).apply { gravity = Gravity.CENTER })
+
+        card.enterWithFade(0)
+
+        title.scaleX = 0.8f
+        title.scaleY = 0.8f
+        title.animate().scaleX(1f).scaleY(1f).setDuration(420)
+            .setInterpolator(android.view.animation.OvershootInterpolator(1.4f))
+            .start()
+
+        root.postDelayed({ launchGame() }, 1500)
     }
 
     private fun launchGame() {

@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.PixelFormat
 import android.graphics.RadialGradient
 import android.graphics.Shader
 import android.graphics.drawable.GradientDrawable
@@ -15,6 +16,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.OvershootInterpolator
 import android.widget.FrameLayout
@@ -22,143 +24,160 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import java.lang.ref.WeakReference
 import kotlin.math.hypot
+import kotlin.math.roundToInt
 
 /**
  * Oyunun ÜZERİNDE duran yüzen AeroKey menüsü.
  *
- * Giriş ekranındaki ek düğmeler (liderlik, profil, anket, hata bildirimi)
- * buraya taşındı: oyuncu bunlara oyun sırasında ihtiyaç duyar, giriş
- * yaparken değil.
+ * NEDEN KENDİ PENCERESİ VAR?
+ * --------------------------
+ * İlk sürümde menü, oyunun Activity'sinin görünüm ağacına (android.R.id.content)
+ * ekleniyordu. Baloncuk duruyorken görünüyordu ama SÜRÜKLENİNCE kayboluyor,
+ * yalnızca yeniden dokunulunca geri geliyordu: Ren'Py oyunu bir SurfaceView
+ * ile çiziliyor ve SurfaceView, pencere yüzeyinde saydam bir "delik" açıyor.
+ * O deliğin üstünde duran görünümler yalnızca pencere yüzeyinin kirli
+ * (yeniden çizilen) bölgelerinde doğru şekilde birleştiriliyor; görünümü
+ * sürükleyince ortaya çıkan yeni bölge güvenilir biçimde tazelenmiyordu.
  *
- * NASIL ÇALIŞIYOR
- * ---------------
- * Sistem seviyesinde bir pencere (TYPE_APPLICATION_OVERLAY) KULLANMIYORUZ;
- * o, kullanıcıdan "diğer uygulamaların üzerinde göster" izni istemeyi
- * gerektirirdi. Bunun yerine görünümü doğrudan oyunun kendi Activity'sinin
- * içerik köküne (android.R.id.content) ekliyoruz. Böylece hiçbir izin
- * gerekmiyor ve menü yalnızca oyun ekranındayken görünüyor.
+ * Çözüm, sorunu tamamen ortadan kaldıran katmanı değiştirmek: menü artık
+ * WindowManager üzerinden AYRI BİR PENCERE. Pencereyi taşımak bir
+ * birleştirici (compositor) işlemidir, oyunun yüzeyinden bağımsızdır; bu
+ * yüzden sürüklerken kaybolma diye bir durum kalmaz.
  *
- * Kök katman TIKLANABİLİR DEĞİL: baloncuğun/panelin dışına yapılan
- * dokunuşlar tüketilmeyip altta duran oyuna geçer, yani menü oyunu
- * engellemez.
+ * İZİN GEREKMİYOR: TYPE_APPLICATION_PANEL, kendi Activity'mizin penceresine
+ * bağlı bir ALT PENCEREDİR (token ile). "Diğer uygulamaların üzerinde
+ * göster" (SYSTEM_ALERT_WINDOW) izni yalnızca TYPE_APPLICATION_OVERLAY için
+ * gerekir; onu kullanmıyoruz.
  *
- * Oyun yatay çalıştığı için panel de yatay düzende tasarlandı: geniş ve
- * alçak, eylemler tek sıra halinde.
+ * DOKUNUŞ GEÇİRGENLİĞİ: Pencereler tam olarak içerikleri kadar büyük ve
+ * FLAG_NOT_TOUCH_MODAL taşıyor, yani pencerelerin DIŞINDAKİ dokunuşlar
+ * doğrudan oyuna gidiyor — menü oyun kontrollerini engellemiyor.
  */
 internal object AeroKeyOverlay {
 
     private var hostRef: WeakReference<Activity>? = null
-    private var rootRef: WeakReference<FrameLayout>? = null
+    private var windowManager: WindowManager? = null
 
-    private var bubble: View? = null
-    private var panel: View? = null
-    private var scrim: View? = null
+    private var bubbleView: View? = null
+    private var bubbleParams: WindowManager.LayoutParams? = null
+
+    private var panelView: View? = null
     private var playtimeLabel: TextView? = null
 
     private var expanded = false
     private var hidden = false
     private var ticker: Runnable? = null
 
+    private var bubbleSizePx = 0
+
     // --- Yaşam döngüsü ---------------------------------------------------
 
-    /**
-     * Menüyü verilen Activity'ye bağlar. Aynı Activity için tekrar
-     * çağrılması zararsızdır; farklı bir Activity gelirse (örn. ekran
-     * döndürme sonrası yeniden oluşturma) eski bağlantı bırakılıp yenisi
-     * kurulur.
-     */
     fun attach(activity: Activity) {
         if (!AeroKeyConfig.ENABLED) return
         if (!hasAnyFeature()) return
         if (activity is AeroKeyGateActivity) return
+        if (hostRef?.get() === activity && bubbleView != null) return
 
-        if (hostRef?.get() === activity && rootRef?.get()?.isAttachedToWindow == true) {
-            return
-        }
         detach()
 
-        val content = activity.findViewById<FrameLayout>(android.R.id.content) ?: return
-
-        val root = object : FrameLayout(activity) {
-            // Kök katman hiçbir dokunuşu kendiliğinden tüketmez; yalnızca
-            // çocukları (baloncuk, panel, perde) tüketir. Bu sayede oyun
-            // dokunuşları normal şekilde alt katmana ulaşır.
-            override fun onTouchEvent(event: MotionEvent): Boolean = false
-        }
-        root.isClickable = false
-        root.fitsSystemWindows = false
-
-        content.addView(
-            root,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        )
+        val token = activity.window?.decorView?.windowToken ?: return
+        val wm = activity.windowManager ?: return
 
         hostRef = WeakReference(activity)
-        rootRef = WeakReference(root)
-        expanded = false
+        windowManager = wm
         hidden = AeroKeyPrefs.overlayHidden(activity)
+        expanded = false
+        bubbleSizePx = activity.dp(54)
 
-        buildScrim(activity, root)
-        buildBubble(activity, root)
-        applyHiddenState(animated = false)
-
-        // Konumu ancak düzen ölçüldükten sonra uygulayabiliriz (kök
-        // genişlik/yüksekliği lazım). Bir OnLayoutChangeListener, hem ilk
-        // ölçümü hem de sonraki boyut değişimlerini (ekran döndürme,
-        // çok pencereli mod) tek yerden karşılar.
-        root.addOnLayoutChangeListener { _, left, top, right, bottom,
-                                         oldLeft, oldTop, oldRight, oldBottom ->
-            val sizeChanged = (right - left) != (oldRight - oldLeft) ||
-                (bottom - top) != (oldBottom - oldTop)
-            if (sizeChanged) {
-                if (expanded) collapse()
-                restorePosition(activity, root)
-            }
+        val view = BubbleView(activity)
+        val params = WindowManager.LayoutParams(
+            bubbleSizePx,
+            bubbleSizePx,
+            WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            this.token = token
+            gravity = Gravity.TOP or Gravity.START
         }
+
+        val (px, py) = restoredPosition(activity)
+        params.x = px
+        params.y = py
+
+        attachDragBehavior(activity, view, params)
+
+        try {
+            wm.addView(view, params)
+        } catch (_: Exception) {
+            // Activity penceresi bu arada gittiyse sessizce vazgeç.
+            hostRef = null
+            windowManager = null
+            return
+        }
+
+        bubbleView = view
+        bubbleParams = params
+        applyHiddenState(animated = false)
     }
 
-    /** Bağlı olduğumuz Activity yok edildiyse referansları bırakırız. */
     fun onActivityDestroyed(activity: Activity) {
         if (hostRef?.get() === activity) detach()
     }
 
     fun detach() {
         stopTicker()
-        val root = rootRef?.get()
-        (root?.parent as? ViewGroup)?.removeView(root)
-        hostRef = null
-        rootRef = null
-        bubble = null
-        panel = null
-        scrim = null
+        collapseImmediate()
+        bubbleView?.let { removeWindow(it) }
+        bubbleView = null
+        bubbleParams = null
         playtimeLabel = null
+        windowManager = null
+        hostRef = null
         expanded = false
+    }
+
+    private fun removeWindow(view: View) {
+        try {
+            windowManager?.removeViewImmediate(view)
+        } catch (_: Exception) {
+            // Zaten kaldırılmışsa önemsiz.
+        }
     }
 
     private fun hasAnyFeature(): Boolean =
         AeroKeyConfig.FEATURE_LEADERBOARD || AeroKeyConfig.FEATURE_PROFILE ||
             AeroKeyConfig.FEATURE_SURVEY || AeroKeyConfig.FEATURE_BUG_REPORT
 
-    // --- Baloncuk --------------------------------------------------------
+    // --- Ekran ölçüleri --------------------------------------------------
 
-    private fun buildBubble(activity: Activity, root: FrameLayout) {
-        val size = activity.dp(54)
+    private fun screenWidth(activity: Activity) = activity.resources.displayMetrics.widthPixels
+    private fun screenHeight(activity: Activity) = activity.resources.displayMetrics.heightPixels
 
-        val view = BubbleView(activity)
-        root.addView(view, FrameLayout.LayoutParams(size, size))
-        bubble = view
-
-        attachDragBehavior(activity, root, view)
+    private fun restoredPosition(activity: Activity): Pair<Int, Int> {
+        val (fx, fy) = AeroKeyPrefs.overlayPosition(activity)
+        val maxX = (screenWidth(activity) - bubbleSizePx).coerceAtLeast(0)
+        val maxY = (screenHeight(activity) - bubbleSizePx).coerceAtLeast(0)
+        return Pair((fx * maxX).roundToInt(), (fy * maxY).roundToInt())
     }
 
+    private fun savePosition(activity: Activity, params: WindowManager.LayoutParams) {
+        val maxX = (screenWidth(activity) - bubbleSizePx).coerceAtLeast(1)
+        val maxY = (screenHeight(activity) - bubbleSizePx).coerceAtLeast(1)
+        AeroKeyPrefs.saveOverlayPosition(
+            activity, params.x.toFloat() / maxX, params.y.toFloat() / maxY
+        )
+    }
+
+    // --- Baloncuk --------------------------------------------------------
+
     /**
-     * Baloncuğu içeriden çizen görünüm: yumuşak bir dış parıltı, gradyanlı
-     * bir halka ve ortada marka işareti. Programatik çizim, kaynak dosyası
-     * (drawable) eklemeden zengin bir görünüm elde etmemizi sağlıyor —
-     * Ren'Py'nin res/ klasörü her derlemede yeniden üretildiği için oraya
-     * dosya koymak kırılgan olurdu.
+     * Baloncuğu içeriden çizen görünüm: yumuşak dış parıltı, gradyanlı halka
+     * ve ortada marka işareti. Programatik çizim, kaynak (drawable) dosyası
+     * eklemeden zengin görünüm sağlıyor — Ren'Py'nin res/ klasörü her
+     * derlemede yeniden üretildiği için oraya dosya koymak kırılgan olurdu.
      */
     private class BubbleView(activity: Activity) : View(activity) {
         private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -199,7 +218,6 @@ internal object AeroKeyOverlay {
             val cy = height / 2f
             val radius = minOf(width, height) / 2f
 
-            // Nefes alan dış parıltı
             val glowRadius = radius * (0.92f + pulse * 0.20f)
             glowPaint.shader = RadialGradient(
                 cx, cy, glowRadius,
@@ -212,7 +230,6 @@ internal object AeroKeyOverlay {
             )
             canvas.drawCircle(cx, cy, glowRadius, glowPaint)
 
-            // Gövde
             val body = radius * 0.76f
             fillPaint.shader = LinearGradient(
                 cx - body, cy - body, cx + body, cy + body,
@@ -221,7 +238,6 @@ internal object AeroKeyOverlay {
             )
             canvas.drawCircle(cx, cy, body, fillPaint)
 
-            // Gradyanlı halka
             ringPaint.shader = LinearGradient(
                 cx - body, cy - body, cx + body, cy + body,
                 intArrayOf(Palette.accentAlt, Palette.accent, Palette.accentWarm),
@@ -233,14 +249,18 @@ internal object AeroKeyOverlay {
         }
     }
 
-    // --- Sürükleme + kenara yapışma --------------------------------------
+    // --- Sürükleme -------------------------------------------------------
 
-    private fun attachDragBehavior(activity: Activity, root: FrameLayout, view: View) {
+    private fun attachDragBehavior(
+        activity: Activity,
+        view: View,
+        params: WindowManager.LayoutParams
+    ) {
         val slop = ViewConfiguration.get(activity).scaledTouchSlop
         var downRawX = 0f
         var downRawY = 0f
-        var startX = 0f
-        var startY = 0f
+        var startX = 0
+        var startY = 0
         var dragging = false
 
         view.setOnTouchListener { v, event ->
@@ -248,8 +268,8 @@ internal object AeroKeyOverlay {
                 MotionEvent.ACTION_DOWN -> {
                     downRawX = event.rawX
                     downRawY = event.rawY
-                    startX = v.x
-                    startY = v.y
+                    startX = params.x
+                    startY = params.y
                     dragging = false
                     v.animate().scaleX(1.12f).scaleY(1.12f).setDuration(120).start()
                     true
@@ -260,11 +280,16 @@ internal object AeroKeyOverlay {
                     val dy = event.rawY - downRawY
                     if (!dragging && hypot(dx, dy) > slop) {
                         dragging = true
-                        collapse()  // sürüklerken panel açık kalmasın
+                        collapse()
                     }
                     if (dragging) {
-                        v.x = clamp(startX + dx, 0f, (root.width - v.width).toFloat())
-                        v.y = clamp(startY + dy, 0f, (root.height - v.height).toFloat())
+                        // Pencereyi taşıyoruz; görünümü değil. Bu, oyunun
+                        // SurfaceView'ı üzerinde güvenilir biçimde çalışır.
+                        params.x = (startX + dx).roundToInt()
+                            .coerceIn(0, screenWidth(activity) - bubbleSizePx)
+                        params.y = (startY + dy).roundToInt()
+                            .coerceIn(0, screenHeight(activity) - bubbleSizePx)
+                        updateBubbleLayout()
                     }
                     true
                 }
@@ -272,7 +297,7 @@ internal object AeroKeyOverlay {
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     v.animate().scaleX(1f).scaleY(1f).setDuration(150).start()
                     if (dragging) {
-                        snapToEdge(activity, root, v)
+                        snapToEdge(activity, params)
                     } else if (event.actionMasked == MotionEvent.ACTION_UP) {
                         if (hidden) reveal() else toggle()
                     }
@@ -284,53 +309,55 @@ internal object AeroKeyOverlay {
         }
     }
 
+    private fun updateBubbleLayout() {
+        val view = bubbleView ?: return
+        val params = bubbleParams ?: return
+        try {
+            windowManager?.updateViewLayout(view, params)
+        } catch (_: Exception) {
+            // Pencere bu arada kaldırıldıysa önemsiz.
+        }
+    }
+
     /** Baloncuğu en yakın yan kenara yaslar ve konumu kalıcı olarak saklar. */
-    private fun snapToEdge(activity: Activity, root: FrameLayout, view: View) {
-        val margin = activity.dp(10).toFloat()
-        val centerX = view.x + view.width / 2f
-        val targetX =
-            if (centerX < root.width / 2f) margin
-            else root.width - view.width - margin
-        val targetY = clamp(view.y, margin, root.height - view.height - margin)
+    private fun snapToEdge(activity: Activity, params: WindowManager.LayoutParams) {
+        val margin = activity.dp(8)
+        val maxX = screenWidth(activity) - bubbleSizePx
+        val maxY = screenHeight(activity) - bubbleSizePx
+        val centerX = params.x + bubbleSizePx / 2
 
-        view.animate()
-            .x(targetX).y(targetY)
-            .setDuration(260)
-            .setInterpolator(DecelerateInterpolator())
-            .withEndAction { savePosition(activity, root, view) }
-            .start()
+        val targetX = if (centerX < screenWidth(activity) / 2) margin else maxX - margin
+        val targetY = params.y.coerceIn(margin, (maxY - margin).coerceAtLeast(margin))
+
+        val fromX = params.x
+        val fromY = params.y
+        ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 240
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { anim ->
+                val t = anim.animatedValue as Float
+                params.x = (fromX + (targetX - fromX) * t).roundToInt()
+                params.y = (fromY + (targetY - fromY) * t).roundToInt()
+                updateBubbleLayout()
+            }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    savePosition(activity, params)
+                }
+            })
+            start()
+        }
     }
-
-    private fun savePosition(activity: Activity, root: FrameLayout, view: View) {
-        // Oranla saklıyoruz: ekran döndüğünde ya da farklı çözünürlükte
-        // baloncuk göreli olarak aynı yerde kalsın.
-        val maxX = (root.width - view.width).coerceAtLeast(1)
-        val maxY = (root.height - view.height).coerceAtLeast(1)
-        AeroKeyPrefs.saveOverlayPosition(activity, view.x / maxX, view.y / maxY)
-    }
-
-    private fun restorePosition(activity: Activity, root: FrameLayout) {
-        val view = bubble ?: return
-        if (root.width == 0 || root.height == 0) return
-        val maxX = (root.width - view.width).coerceAtLeast(1)
-        val maxY = (root.height - view.height).coerceAtLeast(1)
-        val (fx, fy) = AeroKeyPrefs.overlayPosition(activity)
-        view.x = clamp(fx * maxX, 0f, maxX.toFloat())
-        view.y = clamp(fy * maxY, 0f, maxY.toFloat())
-    }
-
-    private fun clamp(value: Float, min: Float, max: Float): Float =
-        if (max < min) min else value.coerceIn(min, max)
 
     // --- Gizleme ---------------------------------------------------------
 
     /**
-     * "Gizle", baloncuğu tamamen yok etmez: küçültüp yarı saydam hale
-     * getirir. Böylece oyunu neredeyse hiç kapatmaz ama oyuncu menüyü
-     * geri getirmenin yolunu da kaybetmez — dokunması yeterlidir.
+     * "Gizle", baloncuğu yok etmez: küçültüp yarı saydam yapar. Böylece
+     * oyunu neredeyse hiç örtmez ama oyuncu menüyü geri getirmenin yolunu
+     * da kaybetmez — dokunması yeterlidir.
      */
     private fun applyHiddenState(animated: Boolean) {
-        val view = bubble ?: return
+        val view = bubbleView ?: return
         val targetAlpha = if (hidden) 0.22f else 1f
         val targetScale = if (hidden) 0.62f else 1f
         if (animated) {
@@ -356,96 +383,96 @@ internal object AeroKeyOverlay {
         applyHiddenState(animated = true)
     }
 
-    // --- Panel -----------------------------------------------------------
+    // --- Panel penceresi -------------------------------------------------
 
     private fun toggle() {
         if (expanded) collapse() else expand()
     }
 
-    private fun buildScrim(activity: Activity, root: FrameLayout) {
-        val view = View(activity).apply {
-            setBackgroundColor(Color.parseColor("#66050813"))
-            alpha = 0f
-            visibility = View.GONE
-            setOnClickListener { collapse() }
-        }
-        root.addView(
-            view,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        )
-        scrim = view
-    }
-
     private fun expand() {
-        val activity = hostRef?.get() ?: return
-        val root = rootRef?.get() ?: return
-        val anchor = bubble ?: return
         if (expanded) return
+        val activity = hostRef?.get() ?: return
+        val wm = windowManager ?: return
+        val bubbleLp = bubbleParams ?: return
+        val token = activity.window?.decorView?.windowToken ?: return
 
-        val view = buildPanel(activity)
-        panel = view
+        val content = buildPanel(activity)
+        val width = panelWidth(activity)
 
-        val params = FrameLayout.LayoutParams(
-            panelWidth(activity, root), ViewGroup.LayoutParams.WRAP_CONTENT
+        // Yüksekliği önceden bilmemiz gerekiyor (konumlandırma için), bu
+        // yüzden paneli genişliğe göre ölçüyoruz.
+        content.measure(
+            View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
         )
-        root.addView(view, params)
+        val height = content.measuredHeight
 
-        scrim?.apply {
-            visibility = View.VISIBLE
-            animate().alpha(1f).setDuration(180).start()
+        val gap = activity.dp(10)
+        val margin = activity.dp(8)
+        val bubbleCenterX = bubbleLp.x + bubbleSizePx / 2
+        val openLeft = bubbleCenterX > screenWidth(activity) / 2
+
+        var x = if (openLeft) bubbleLp.x - gap - width else bubbleLp.x + bubbleSizePx + gap
+        x = x.coerceIn(margin, (screenWidth(activity) - width - margin).coerceAtLeast(margin))
+
+        var y = bubbleLp.y + bubbleSizePx / 2 - height / 2
+        y = y.coerceIn(margin, (screenHeight(activity) - height - margin).coerceAtLeast(margin))
+
+        val params = WindowManager.LayoutParams(
+            width,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            this.token = token
+            gravity = Gravity.TOP or Gravity.START
+            this.x = x
+            this.y = y
         }
 
-        view.visibility = View.INVISIBLE
-        view.post { positionPanel(activity, root, anchor, view) }
+        // Panelin DIŞINA yapılan dokunuş paneli kapatır. FLAG_NOT_TOUCH_MODAL
+        // sayesinde aynı dokunuş oyuna da ulaşır; panel yolu tıkamaz.
+        content.setOnTouchListener { _, event ->
+            if (event.actionMasked == MotionEvent.ACTION_OUTSIDE) {
+                collapse()
+                true
+            } else {
+                false
+            }
+        }
 
+        try {
+            wm.addView(content, params)
+        } catch (_: Exception) {
+            return
+        }
+
+        panelView = content
         expanded = true
+
+        content.pivotX = if (openLeft) width.toFloat() else 0f
+        content.pivotY = height / 2f
+        content.scaleX = 0.86f
+        content.scaleY = 0.86f
+        content.alpha = 0f
+        content.animate()
+            .scaleX(1f).scaleY(1f).alpha(1f)
+            .setDuration(260)
+            .setInterpolator(OvershootInterpolator(0.9f))
+            .start()
+
         startTicker()
     }
 
-    private fun panelWidth(activity: Activity, root: FrameLayout): Int {
-        // Yatay ekranda tüm genişliği kaplamak oyunu gereksiz yere
-        // örterdi; ekranın bir kısmıyla sınırlıyoruz.
-        val max = activity.dp(600)
-        val preferred = (root.width * 0.68f).toInt()
-        return preferred.coerceIn(activity.dp(300), max)
-    }
-
-    /** Paneli baloncuğun yanına, ekran dışına taşmayacak şekilde yerleştirir. */
-    private fun positionPanel(
-        activity: Activity,
-        root: FrameLayout,
-        anchor: View,
-        view: View
-    ) {
-        val gap = activity.dp(12)
-        val margin = activity.dp(10)
-
-        val anchorCenterX = anchor.x + anchor.width / 2f
-        val openLeft = anchorCenterX > root.width / 2f
-
-        var x = if (openLeft) anchor.x - gap - view.width else anchor.x + anchor.width + gap
-        x = clamp(x, margin.toFloat(), (root.width - view.width - margin).toFloat())
-
-        var y = anchor.y + anchor.height / 2f - view.height / 2f
-        y = clamp(y, margin.toFloat(), (root.height - view.height - margin).toFloat())
-
-        view.x = x
-        view.y = y
-        view.visibility = View.VISIBLE
-
-        // Baloncuktan doğuyormuş gibi açılsın.
-        view.pivotX = if (openLeft) view.width.toFloat() else 0f
-        view.pivotY = view.height / 2f
-        view.scaleX = 0.86f
-        view.scaleY = 0.86f
-        view.alpha = 0f
-        view.animate()
-            .scaleX(1f).scaleY(1f).alpha(1f)
-            .setDuration(280)
-            .setInterpolator(OvershootInterpolator(0.9f))
-            .start()
+    private fun panelWidth(activity: Activity): Int {
+        // Yatay ekranda tüm genişliği kaplamak oyunu gereksiz yere örterdi.
+        val max = activity.dp(560)
+        val preferred = (screenWidth(activity) * 0.62f).toInt()
+        return preferred.coerceIn(activity.dp(280), max)
     }
 
     private fun collapse() {
@@ -453,18 +480,21 @@ internal object AeroKeyOverlay {
         expanded = false
         stopTicker()
 
-        scrim?.animate()?.alpha(0f)?.setDuration(160)?.withEndAction {
-            scrim?.visibility = View.GONE
-        }?.start()
-
-        val view = panel ?: return
-        panel = null
+        val view = panelView ?: return
+        panelView = null
         playtimeLabel = null
         view.animate()
             .scaleX(0.88f).scaleY(0.88f).alpha(0f)
             .setDuration(170)
-            .withEndAction { (view.parent as? ViewGroup)?.removeView(view) }
+            .withEndAction { removeWindow(view) }
             .start()
+    }
+
+    /** Animasyon beklemeden kapatır (detach sırasında kullanılır). */
+    private fun collapseImmediate() {
+        expanded = false
+        panelView?.let { removeWindow(it) }
+        panelView = null
     }
 
     // --- Panel içeriği ---------------------------------------------------
@@ -478,7 +508,6 @@ internal object AeroKeyOverlay {
                 elevation = activity.dp(16).toFloat()
             }
         }
-
         card.addView(buildPanelHeader(activity))
         card.addSpace(activity.dp(14))
         card.addView(buildActionRow(activity))
@@ -487,7 +516,6 @@ internal object AeroKeyOverlay {
         return card
     }
 
-    /** Panelin arka planı: koyu cam + ince gradyan kenarlık hissi. */
     private fun panelBackground(activity: Activity): GradientDrawable =
         GradientDrawable(
             GradientDrawable.Orientation.TL_BR,
@@ -498,8 +526,8 @@ internal object AeroKeyOverlay {
         }
 
     /**
-     * Başlık satırı: hangi oyunda olduğumuzu yazar (kullanıcının istediği
-     * gibi) ve yanında canlı oynama süresini gösterir.
+     * Başlık satırı: hangi oyunda olduğumuzu yazar ve canlı oynama süresini
+     * gösterir.
      */
     private fun buildPanelHeader(activity: Activity): View {
         val header = activity.row()
@@ -524,10 +552,11 @@ internal object AeroKeyOverlay {
             typeface = android.graphics.Typeface.DEFAULT_BOLD
         })
         titles.addView(TextView(activity).apply {
-            text = "AeroKey menüsü"
+            text = AeroKeyPrefs.username(activity)
             setTextColor(Palette.textMuted)
             textSize = 10.5f
-            letterSpacing = 0.09f
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
         })
         header.addView(
             titles,
@@ -569,9 +598,8 @@ internal object AeroKeyOverlay {
 
         val row = activity.row().apply { gravity = Gravity.CENTER }
         for ((index, entry) in entries.withIndex()) {
-            val tile = buildActionTile(activity, entry.first, entry.second, entry.third)
             row.addView(
-                tile,
+                buildActionTile(activity, entry.first, entry.second, entry.third),
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                     if (index > 0) leftMargin = activity.dp(8)
                 }
@@ -620,16 +648,10 @@ internal object AeroKeyOverlay {
 
     private fun buildPanelFooter(activity: Activity): View {
         val footer = activity.row()
-
         footer.addView(activity.ghostButton("🙈  Menüyü gizle").apply {
             setOnClickListener { hide() }
         })
-
-        footer.addView(
-            View(activity),
-            LinearLayout.LayoutParams(0, 1, 1f)
-        )
-
+        footer.addView(View(activity), LinearLayout.LayoutParams(0, 1, 1f))
         footer.addView(activity.ghostButton("Kapat").apply {
             setOnClickListener { collapse() }
         })
@@ -649,7 +671,6 @@ internal object AeroKeyOverlay {
         playtimeLabel?.text = "⏱ " + formatPlaytime(AeroKeySession.currentGameSeconds(activity))
     }
 
-    /** Panel açıkken süreyi saniye başına tazeler. */
     private fun startTicker() {
         stopTicker()
         val view = playtimeLabel ?: return
