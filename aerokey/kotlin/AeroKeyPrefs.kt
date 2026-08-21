@@ -141,4 +141,40 @@ internal object AeroKeyPrefs {
     fun setAchievementsRaw(context: Context, raw: String) {
         prefs(context).edit().putString(K_ACHIEVEMENTS, raw).apply()
     }
+
+    // --- Oyun içi yüzen menü ---------------------------------------------
+
+    private const val K_OVERLAY_X = "overlay_x"
+    private const val K_OVERLAY_Y = "overlay_y"
+    private const val K_OVERLAY_HIDDEN = "overlay_hidden"
+
+    /**
+     * Baloncuğun konumu, ekran boyutunun ORANI olarak (0..1) saklanır.
+     * Piksel saklamak, ekran döndüğünde ya da farklı bir cihazda menünün
+     * ekran dışında kalmasına yol açardı.
+     *
+     * Varsayılan: sağ kenar, dikeyde ortanın biraz üstü — yatay oyunlarda
+     * genelde en az iş yapan bölge burasıdır.
+     */
+    fun overlayPosition(context: Context): Pair<Float, Float> {
+        val p = prefs(context)
+        return Pair(
+            p.getFloat(K_OVERLAY_X, 1f).coerceIn(0f, 1f),
+            p.getFloat(K_OVERLAY_Y, 0.32f).coerceIn(0f, 1f)
+        )
+    }
+
+    fun saveOverlayPosition(context: Context, fractionX: Float, fractionY: Float) {
+        prefs(context).edit()
+            .putFloat(K_OVERLAY_X, fractionX.coerceIn(0f, 1f))
+            .putFloat(K_OVERLAY_Y, fractionY.coerceIn(0f, 1f))
+            .apply()
+    }
+
+    fun overlayHidden(context: Context): Boolean =
+        prefs(context).getBoolean(K_OVERLAY_HIDDEN, false)
+
+    fun setOverlayHidden(context: Context, hidden: Boolean) {
+        prefs(context).edit().putBoolean(K_OVERLAY_HIDDEN, hidden).apply()
+    }
 }

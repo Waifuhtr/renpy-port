@@ -138,13 +138,43 @@ derlenir; boş bırakırsanız araç klasör adından tahmin eder.
 Açtığınızda, oyunun **açılış ekranı** Ren'Py'nin kendi ekranı yerine Kotlin
 ile yazılmış bir lisans geçidi olur. Doğrulama geçilmeden oyun başlamaz.
 
-### Ekranda neler var
+### Giriş ekranında neler var
 
 - **Erişim anahtarı** girişi → `GET /wp-json/lisans/v1/kontrol?anahtar=…`
 - **⭐ VIP Üyeyim** → `GET /wp-json/lisans/v1/vip-kontrol?device_id=…`
 - **🔑 Anahtar Al** → tarayıcıda `https://riaslink.fun/bilgi` sayfasını açar
 - **Cihaz kimliği + Kopyala** → VIP tanımlarken bu kimliği kullanırsınız
-- İsteğe bağlı paneller: 🏆 Liderlik, 👤 Profil, 📊 Anket, 🐞 Hata Bildir
+
+Giriş ekranının tek işi doğrulamadır. Liderlik/profil/anket/hata bildirimi
+burada değil, aşağıdaki oyun içi menüdedir — oyuncu bunlara oyun sırasında
+ihtiyaç duyar, henüz oyuna girmeden değil.
+
+### 🎮 Oyun içi yüzen menü
+
+Doğrulamadan sonra oyunun üzerinde küçük, parlayan bir **baloncuk** belirir.
+Oyun yatay çalıştığı için menü de yatay düzende tasarlandı.
+
+- **Sürüklenebilir** — baloncuğu istediğiniz yere taşıyın; bıraktığınızda en
+  yakın yan kenara yaslanır. Konum, ekranın **oranı** olarak saklanır, yani
+  ekran döndüğünde ya da başka bir cihazda menü ekran dışında kalmaz.
+- **Dokununca açılır** — geniş ve alçak bir panel, baloncuğun yer olan
+  tarafına doğru açılır:
+  - **Başlıkta hangi oyunda olduğunuz** yazar (uygulama adı),
+  - yanında **canlı oynama süresi** (panel açıkken saniye saniye tazelenir),
+  - tek sıra hâlinde etkin olan eylemler: 🏆 Liderlik, 👤 Profilim,
+    📊 Anket, 🐞 Hata Bildir.
+- **🙈 Menüyü gizle** — baloncuğu küçültüp neredeyse saydam yapar, yani oyunu
+  örtmez. Yok olmaz: tek dokunuşla geri gelir, böylece menüyü geri getirmenin
+  yolunu kaybetmezsiniz. Gizli/açık durumu da kalıcı olarak saklanır.
+- Menünün **dışına** yapılan dokunuşlar tüketilmez, doğrudan oyuna geçer —
+  yani menü oyun kontrollerini engellemez (panel açıkken hariç; o sırada
+  arka planı karartan perde dokunuşları yakalar ve panel kapanır).
+
+Teknik not: sistem seviyesinde bir pencere (`TYPE_APPLICATION_OVERLAY`)
+kullanılmıyor — o, kullanıcıdan "diğer uygulamaların üzerinde göster" izni
+istemeyi gerektirirdi. Menü doğrudan oyunun kendi Activity'sinin içerik
+köküne ekleniyor, yani **hiçbir ek izin gerekmiyor** ve menü yalnızca oyun
+ekranındayken görünüyor.
 
 ### Her zaman etkin olanlar
 

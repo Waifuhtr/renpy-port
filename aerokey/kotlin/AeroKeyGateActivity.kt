@@ -121,11 +121,10 @@ class AeroKeyGateActivity : Activity() {
         holder.addSpace(dp(18))
         holder.addView(buildDeviceIdChip())
 
-        val extras = buildExtraButtons()
-        if (extras != null) {
-            holder.addSpace(dp(18))
-            holder.addView(extras)
-        }
+        // Liderlik / profil / anket / hata bildirimi burada DEĞİL: bunlar
+        // oyun içinde açılan yüzen menüde yaşıyor (bkz. AeroKeyOverlay).
+        // Giriş ekranının tek işi doğrulama; oyuncu daha oyuna girmeden
+        // liderlik tablosuna bakmak istemez.
 
         holder.addSpace(dp(16))
         holder.addView(bodyText("AeroKey ile korunmaktadır", 11f).apply {
@@ -261,33 +260,6 @@ class AeroKeyGateActivity : Activity() {
         return chip
     }
 
-    private fun buildExtraButtons(): View? {
-        val entries = mutableListOf<Pair<String, () -> Unit>>()
-        if (AeroKeyConfig.FEATURE_LEADERBOARD) {
-            entries += "🏆 Liderlik" to { AeroKeyPanels.showLeaderboard(this) }
-        }
-        if (AeroKeyConfig.FEATURE_PROFILE) {
-            entries += "👤 Profilim" to { AeroKeyPanels.showProfile(this) }
-        }
-        if (AeroKeyConfig.FEATURE_SURVEY) {
-            entries += "📊 Anket" to { AeroKeyPanels.showSurvey(this) }
-        }
-        if (AeroKeyConfig.FEATURE_BUG_REPORT) {
-            entries += "🐞 Hata Bildir" to { AeroKeyPanels.showBugReport(this) }
-        }
-        if (entries.isEmpty()) return null
-
-        val wrap = row().apply { gravity = Gravity.CENTER }
-        for ((index, entry) in entries.withIndex()) {
-            wrap.addView(
-                ghostButton(entry.first).apply { setOnClickListener { entry.second() } },
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    if (index > 0) leftMargin = dp(8)
-                }
-            )
-        }
-        return wrap
-    }
 
     private fun buildBusyOverlay(): View {
         val overlay = FrameLayout(this).apply {

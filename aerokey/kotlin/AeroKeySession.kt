@@ -74,7 +74,14 @@ internal object AeroKeySession {
         app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityResumed(a: Activity) {
                 foregroundCount++
-                if (a !is AeroKeyGateActivity) currentActivity = WeakReference(a)
+                if (a !is AeroKeyGateActivity) {
+                    currentActivity = WeakReference(a)
+                    // Yüzen menüyü oyun ekranına bağla. attach() aynı
+                    // Activity için tekrar çağrılmaya dayanıklıdır; ekran
+                    // döndürmede Activity yeniden oluşturulduğu için bu
+                    // çağrının her devam edişte yapılması gerekir.
+                    AeroKeyOverlay.attach(a)
+                }
             }
 
             override fun onActivityPaused(a: Activity) {
@@ -87,11 +94,16 @@ internal object AeroKeySession {
                 }
             }
 
+            override fun onActivityDestroyed(a: Activity) {
+                // Menü yok olan bir Activity'nin görünüm ağacına tutunup
+                // sızıntı yapmasın.
+                if (a !is AeroKeyGateActivity) AeroKeyOverlay.onActivityDestroyed(a)
+            }
+
             override fun onActivityCreated(a: Activity, s: Bundle?) = Unit
             override fun onActivityStarted(a: Activity) = Unit
             override fun onActivityStopped(a: Activity) = Unit
             override fun onActivitySaveInstanceState(a: Activity, s: Bundle) = Unit
-            override fun onActivityDestroyed(a: Activity) = Unit
         })
 
         startTicker()

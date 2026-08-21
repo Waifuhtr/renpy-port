@@ -60,8 +60,11 @@ internal object AeroKeyPanels {
 
         outer.addView(card)
         dialog.setContentView(outer)
+        // Oyun yatay çalıştığı için diyalogu tüm genişliğe yaymıyoruz;
+        // yatayda ekranın bir kısmıyla sınırlı, dikeyde neredeyse tam
+        // genişlik kullanıyoruz (bkz. Activity.dialogWidth).
         dialog.window?.setLayout(
-            ViewGroup.LayoutParams.MATCH_PARENT,
+            activity.dialogWidth(),
             ViewGroup.LayoutParams.WRAP_CONTENT
         )
         dialog.window?.setGravity(Gravity.CENTER)
@@ -164,8 +167,10 @@ internal object AeroKeyPanels {
         return ScrollView(activity).apply {
             isVerticalScrollBarEnabled = false
             addView(column)
+            // Sabit bir yükseklik yatay ekranda diyalogu ekran dışına
+            // taşırırdı; ekran yüksekliğinin bir oranını kullanıyoruz.
             layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, activity.dp(360)
+                ViewGroup.LayoutParams.MATCH_PARENT, activity.dialogListHeight()
             )
         }
     }
