@@ -389,19 +389,44 @@ def detect_jvm_target(text: str) -> str:
     return "17"
 
 
-def patch_root_gradle(sdk: Path, kotlin_version: str) -> bool:
-    """Kök build.gradle'a Kotlin eklentisini (apply false) tanıtır."""
-    root_gradle = sdk / "rapt" / "prototype" / "build.gradle"
+def _gradle_project_roots(sdk: Path) -> list[Path]:
+    """
+    Gerçekten Gradle ile derlenen kök dizinler.
+
+    KRİTİK: Gradle derlemesi `rapt/project/` içinde çalışır — `rapt/prototype/`
+    yalnızca `project/` ilk kez oluşturulurken kaynak olarak kopyalanan bir
+    şablondur. `project/` bir kez var olduktan sonra `renpyandroid/build.gradle`
+    ve kök `build.gradle` gibi dosyalar prototype'tan OTOMATİK tazelenmez
+    (yalnızca Jinja2 şablonundan üretilen manifest/build.gradle/strings.xml
+    her derlemede yenilenir, bkz. dosyanın en üstündeki not).
+
+    Bu yüzden Kotlin eklentisini SADECE prototype'a yazmak yetmez: `project/`
+    zaten varsa (ki neredeyse her zaman öyledir — ilk derlemeden sonra kalıcı
+    kalır) onun kendi build.gradle dosyaları da ayrıca yamalanmalıdır, yoksa
+    gerçekte derlenen kopya Kotlin eklentisinden habersiz kalır. Sonuç: .kt
+    dosyaları diskte durur ama hiçbir zaman derlenmez, build hatasız biter,
+    ve APK'de sınıf eksik olduğu için uygulama ClassNotFoundException ile
+    çöker — Kotlin derleyicisi hiç devreye girmediği için Gradle bunu
+    HİÇBİR ŞEKİLDE hata olarak bildirmez.
+    """
+    roots = [sdk / "rapt" / "prototype"]
+    project_root = sdk / "rapt" / "project"
+    if project_root.is_dir():
+        roots.append(project_root)
+    return roots
+
+
+def _patch_root_gradle_file(root_gradle: Path, kotlin_version: str) -> bool:
     if not root_gradle.is_file():
         raise PatchError(f"Kök build.gradle bulunamadı: {root_gradle}")
 
     text = read(root_gradle)
     if MARKER in text:
-        print("[aerokey] Kök build.gradle zaten yamalı, atlanıyor.")
+        print(f"[aerokey] Zaten yamalı, atlanıyor: {root_gradle}")
         return False
 
     if "org.jetbrains.kotlin.android" in text:
-        print("[aerokey] Kök build.gradle Kotlin eklentisini zaten tanıyor.")
+        print(f"[aerokey] Kotlin eklentisini zaten tanıyor: {root_gradle}")
         return False
 
     plugins_match = re.search(r"plugins\s*\{", text)
@@ -428,24 +453,32 @@ def patch_root_gradle(sdk: Path, kotlin_version: str) -> bool:
         text = text[:insert_at] + addition + text[insert_at:]
 
     write(root_gradle, text)
-    print(f"[aerokey] Kök build.gradle yamalandı (Kotlin {kotlin_version}).")
+    print(f"[aerokey] Yamalandı (Kotlin {kotlin_version}): {root_gradle}")
     return True
 
 
-def patch_module_gradle(sdk: Path) -> bool:
+def patch_root_gradle(sdk: Path, kotlin_version: str) -> bool:
     """
-    renpyandroid modülüne Kotlin eklentisini uygular.
+    Kök build.gradle'a Kotlin eklentisini (apply false) tanıtır.
 
-    Bu dosya Jinja2 şablonundan ÜRETİLMEDİĞİ için buraya yazdığımız yama
-    kalıcıdır (app/build.gradle'ın aksine).
+    HEM `rapt/prototype/build.gradle` (şablon) HEM DE — varsa —
+    `rapt/project/build.gradle` (gerçekte derlenen kopya) yamalanır; bkz.
+    `_gradle_project_roots` neden ikisinin de gerekli olduğu için.
     """
-    module_gradle = sdk / "rapt" / "prototype" / "renpyandroid" / "build.gradle"
+    patched_any = False
+    for root in _gradle_project_roots(sdk):
+        if _patch_root_gradle_file(root / "build.gradle", kotlin_version):
+            patched_any = True
+    return patched_any
+
+
+def _patch_module_gradle_file(module_gradle: Path) -> bool:
     if not module_gradle.is_file():
         raise PatchError(f"renpyandroid/build.gradle bulunamadı: {module_gradle}")
 
     text = read(module_gradle)
     if MARKER in text:
-        print("[aerokey] renpyandroid/build.gradle zaten yamalı, atlanıyor.")
+        print(f"[aerokey] Zaten yamalı, atlanıyor: {module_gradle}")
         return False
 
     jvm_target = detect_jvm_target(text)
@@ -496,8 +529,23 @@ def patch_module_gradle(sdk: Path) -> bool:
     )
 
     write(module_gradle, text)
-    print(f"[aerokey] renpyandroid/build.gradle yamalandı (jvmTarget {jvm_target}).")
+    print(f"[aerokey] Yamalandı (jvmTarget {jvm_target}): {module_gradle}")
     return True
+
+
+def patch_module_gradle(sdk: Path) -> bool:
+    """
+    renpyandroid modülüne Kotlin eklentisini uygular.
+
+    HEM `rapt/prototype/renpyandroid/build.gradle` HEM DE — varsa —
+    `rapt/project/renpyandroid/build.gradle` yamalanır; aynı gerekçe için
+    bkz. `_gradle_project_roots`.
+    """
+    patched_any = False
+    for root in _gradle_project_roots(sdk):
+        if _patch_module_gradle_file(root / "renpyandroid" / "build.gradle"):
+            patched_any = True
+    return patched_any
 
 
 # ---------------------------------------------------------------------------
