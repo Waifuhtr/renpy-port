@@ -12,185 +12,243 @@ license: mit
 # 🎮 Ren'Py → Android (APK / AAB) Paketleyici
 
 Ren'Py oyun projenizin ZIP dosyasını yükleyin, arayüz sizin için Android
-**APK** ve/veya **AAB** (Google Play) paketi üretsin.
+**APK** ve/veya **AAB** (Google Play) paketi üretsin. İsterseniz oyuna,
+**AeroKey** WordPress eklentinizle konuşan native (Kotlin) bir **lisans /
+giriş ekranı** de ekler.
 
-Bu araç kendi başına bir "Android'e dönüştürme" motoru değildir; kaputun
-altında resmi Ren'Py derleme zincirini (RAPT + Gradle) çalıştıran, aktif
-olarak bakımı yapılan açık kaynak **renkit** aracını (`renutil` +
-`renconstruct`) otomatikleştirir:
+Kaputun altında resmi Ren'Py derleme zincirini (RAPT + Gradle) çalıştıran
+açık kaynak **renkit** aracını (`renutil` + `renconstruct`) otomatikleştirir:
 👉 https://github.com/kobaltcore/renkit (MIT lisans)
 
 ---
 
-## ⚠️ Önce şunu netleştirelim: `renpy-build` bu işi yapmıyor
+## Neler yapar
 
-Sorduğunuz `renpy/renpy-build` reposu gerçek ve önemli bir proje, ama işlevi
-sandığınızdan farklı: **tek tek oyunları paketlemiyor.** O repo, Ren'Py
-**motorunun kendisini** (Python, SDL, FFmpeg gibi native bağımlılıklarla
-birlikte) Windows/Linux/macOS/Android/iOS/Web için **çapraz derleyen** bir
-build sistemidir — Ren'Py'nin geliştiricisi PyTom'un, Ren'Py SDK'sının her
-sürümünü ve Android/iOS'a gömülen alt bileşenleri üretmek için kullandığı
-bir araçtır. Kendisinin bir Gradio/CLI "oyunu yükle, APK al" arayüzü yoktur
-ve tek bir oyun projesini derlemek için tasarlanmamıştır.
-
-Bir *oyunu* Android paketine dönüştürmenin gerçek yolu, Ren'Py SDK'sıyla
-birlikte gelen **RAPT** (Ren'Py Android Packaging Tool) ve onun kullandığı
-Gradle derleme hattıdır. Bu Space de tam olarak bunu, `renkit` üzerinden
-otomatikleştirerek yapıyor.
+| Özellik | Açıklama |
+|---|---|
+| APK / AAB üretimi | Resmi RAPT + Gradle hattı üzerinden |
+| **Derlenmiş proje desteği** | `Build Distributions` çıktısını da (sadece `.rpyc`) paketleyebilir |
+| **Otomatik imzalama** | Kalıcı anahtar bir kez üretilir, her derlemede aynısı kullanılır |
+| **AeroKey lisans ekranı** | Kotlin ile yazılmış, oyundan önce açılan native giriş ekranı |
+| **Oyun süresi sayımı** | Oynanan süre sunucuya senkronlanır (Steam tarzı) |
+| Otomatik ikon | Tek kare görselden iki katmanlı adaptif ikon üretir |
+| Gradle ön belleklemesi | 504 / indirme hatalarını baştan engeller |
+| Canlı günlük | Server-Sent Events ile anlık akan derleme çıktısı |
 
 ---
 
-## Kurulum (Hugging Face'te bu Space'i oluşturma)
+## Kurulum (Hugging Face Space)
 
 1. Hugging Face'te **yeni bir Space** oluşturun.
-2. SDK olarak mutlaka **Docker**'ı seçin ("Gradio" SDK'sını DEĞİL — çünkü
-   düz Gradio SDK'sı yalnızca `requirements.txt`'teki Python paketlerini
-   kurar; bize Java, Android derleme araçları gibi sistem seviyesi
-   bağımlılıklar gerekiyor, bunlar için Dockerfile şart).
-3. Bu klasördeki 4 dosyayı (`Dockerfile`, `app.py`, `requirements.txt`,
-   `README.md`) Space'inizin kök dizinine ekleyin (Hugging Face web
-   arayüzünden tek tek yükleyebilir ya da Space'i yerel makinenize
-   `git clone`'layıp dosyaları oraya kopyalayıp `git push` edebilirsiniz).
-4. Space otomatik olarak build almaya başlar. **İlk build 10-20+ dakika
-   sürebilir** çünkü Java, renkit ve tüm Ren'Py SDK'sı imaja gömülüyor.
-5. Build bitince arayüz açılır ve kullanmaya hazırsınız.
+2. SDK olarak mutlaka **Docker**'ı seçin (Gradio SDK'sını DEĞİL — bize Java
+   ve Android derleme araçları gibi sistem seviyesi bağımlılıklar gerekiyor).
+3. Bu depodaki dosyaları Space'inizin kök dizinine ekleyin:
 
-### Donanım hakkında
+   ```
+   Dockerfile
+   app.py
+   requirements.txt
+   README.md
+   icon.placeholder          (silmeyin — Dockerfile'daki COPY icon.* buna dayanıyor)
+   web/index.html
+   web/style.css
+   web/app.js
+   aerokey/__init__.py
+   aerokey/patch_rapt.py
+   aerokey/kotlin/*.kt        (7 dosya)
+   ```
 
-Android/Gradle derlemeleri hem RAM hem disk açısından ağırdır. Ücretsiz/en
-düşük donanım katmanında build'ler çok yavaş olabilir ya da bellek
-yetersizliğinden başarısız olabilir. Sorun yaşarsanız Space
-**Settings → Hardware** kısmından daha güçlü bir CPU katmanına
-yükseltmeyi deneyin (güncel seçenekler ve kaynak miktarları için Hugging
-Face'in kendi fiyatlandırma sayfasına bakın, burada belirli bir GB/vCPU
-rakamı vermiyoruz çünkü bu rakamlar zamanla değişebiliyor).
+4. **Settings → Variables and secrets** kısmından isterseniz şunları
+   ayarlayabilirsiniz (hepsi isteğe bağlı):
+
+   | Değişken | Varsayılan | Ne işe yarar |
+   |---|---|---|
+   | `RENPY_VERSION` | `8.5.3` | İmaja gömülecek Ren'Py sürümü |
+   | `AEROKEY_BASE_URL` | `https://riaslink.fun` | WordPress sitenizin kökü |
+   | `AEROKEY_KEY_PAGE` | `https://riaslink.fun/bilgi` | "Anahtar Al" düğmesinin açacağı sayfa |
+   | `AEROKEY_GAME_ID_PREFIX` | `riaslink_oyun_` | Oyun kimliği öneki |
+   | `PORTER_DATA_DIR` | `/data` | Kalıcı veri konumu |
+
+5. **Settings → Persistent storage** açmanız şiddetle önerilir (aşağıya bakın).
+6. Space otomatik build alır. **İlk build 15-25 dakika sürebilir** (Java,
+   renkit, Ren'Py SDK ve Gradle imaja gömülüyor).
+
+### ⚠️ Kalıcı disk neden önemli?
+
+İmza anahtarı ve oyun kimliği kaydı `/data` altında tutulur. Kalıcı disk
+**yoksa** Space her yeniden başladığında:
+
+- imza anahtarı sıfırdan üretilir → yeni APK'ler eskilerin üzerine kurulamaz,
+- oyun kimliği sayacı sıfırlanır → `riaslink_oyun_001` yeniden verilir.
+
+Arayüz kalıcı disk yoksa üst köşede sarı bir uyarı gösterir. Kalıcı disk
+açamıyorsanız, **"Anahtarı indir (yedekle)"** düğmesiyle imza anahtarınızı
+indirip saklayın ve sonraki derlemelerde elle yükleyin.
+
+### Donanım
+
+Android/Gradle derlemeleri hem RAM hem disk açısından ağırdır. Ücretsiz
+katmanda build'ler çok yavaş olabilir ya da bellek yetersizliğinden
+başarısız olabilir. Sorun yaşarsanız **Settings → Hardware** kısmından daha
+güçlü bir CPU katmanına geçmeyi deneyin.
 
 ---
 
 ## Kullanım
 
-1. **Proje ZIP'i**: Ren'Py proje klasörünüzü (içinde `game/` klasörü olan
-   klasörü) zip'leyip yükleyin. Klasörü doğrudan zip'lemişseniz de
-   (`game/` zip'in kökünde), bir üst klasörle birlikte zip'lemişseniz de
-   (`projem/game/...`) araç bunu otomatik olarak anlar.
-2. **Ren'Py sürümü**: Varsayılan olarak imaja gömülü sürüm önerilir (en
-   hızlısı budur). Farklı bir sürüm girerseniz ilk seferde ayrıca indirilir.
-3. **APK / AAB**: APK, doğrudan telefona kurmak veya Play dışı mağazalara
-   yüklemek içindir. AAB, Google Play Store'a yüklemek içindir.
-4. **Paket adı öneki**: Projenizde `build.package` açıkça tanımlı değilse,
-   paket adı `önek.oyunadı` şeklinde üretilir (varsayılan önek:
-   `com.riaslinkfun` — kendi öneğinizle değiştirebilirsiniz). Aynı oyun
-   için bu her zaman aynı sonucu üretir (güncelleme sürekliliği bozulmaz),
-   ama projenizde kendi `build.package`'ınız tanımlıysa o kullanılır, bu
-   alan yok sayılır.
-5. **Gelişmiş → Uygulama İkonu** (isteğe bağlı): Tek bir kare görsel
-   yükleyin, Ren'Py'nin istediği iki katmanlı adaptif ikona (bkz. aşağı)
-   otomatik dönüştürülür. Boş bırakırsanız, Space'e gömülü bir `icon.png`/
-   `icon.jpg` varsa o kullanılır (bkz. "İkon" bölümü), o da yoksa Ren'Py
-   varsayılan ikonunu kullanır.
-6. **Gelişmiş → Keystore** (isteğe bağlı ama önemli, aşağıya bakın).
-7. **"Android Paketini Oluştur"**'a basın; sağdaki günlük penceresinde
-   derleme çıktısını canlı olarak izleyebilirsiniz. Bitince dosyalar
-   indirme alanında belirir.
+1. **Proje ZIP'i** — Ren'Py proje klasörünüzü (içinde `game/` olan klasörü)
+   zip'leyip yükleyin. `game/` zip'in kökünde de olabilir, bir üst klasörle
+   birlikte de (`projem/game/...`) — araç ikisini de anlar.
+2. **Ren'Py sürümü** — Varsayılan olarak imaja gömülü sürüm en hızlısıdır.
+   Farklı bir sürüm girerseniz ilk seferde ayrıca indirilir (ve AeroKey
+   yaması o sürüme de otomatik uygulanır).
+3. **APK / AAB** — APK doğrudan telefona kurmak için, AAB Google Play için.
+4. **Derlenmiş proje bilgileri** — aşağıya bakın.
+5. **AeroKey lisans ekranı** — aşağıya bakın.
+6. **İkon ve imzalama** — ikon isteğe bağlı; imzalama otomatik.
 
 ---
 
-## 🖼️ Uygulama İkonu
+## 📦 Derlenmiş (hazır dağıtım) projeler
 
-Ren'Py, Android ikonunu projenizin kök dizinindeki **iki** 432×432 PNG
-dosyasından üretir (bkz. [resmi belge](https://www.renpy.org/doc/html/android.html#icon-and-presplash-images)):
-`android-icon_foreground.png` (şeffaf ön katman) ve
-`android-icon_background.png` (opak arka plan) — Google'ın "adaptive icon"
-sistemi bu ikisini cihazda birleştirir.
+Ren'Py Launcher'ın **Build Distributions** çıktısı (örn.
+`OyunAdı-1.2.1-pc.zip`) ham proje kaynağından farklıdır: `.rpy` kaynakları
+çıkarılıp yalnızca derlenmiş `.rpyc` bırakılır ve `renpy/` + `lib/` (masaüstü
+motoru) eklenir.
 
-Bu araç, size tek bir görsel yükleme kolaylığı sağlar:
+Bu araç böyle paketleri **paketleyebilir**. Yaptıkları:
 
-- **Space'e kalıcı olarak eklemek isterseniz:** Bu repoya (Dockerfile'ın
-  yanına) `icon.png` veya `icon.jpg` olarak bir dosya ekleyip Space'i
-  yeniden build alın. O andan itibaren her derlemede otomatik kullanılır.
-- **Sadece bu derlemeye özel bir ikon denemek isterseniz:** Arayüzdeki
-  "Gelişmiş → Uygulama İkonu" alanından yükleyin; Space'e gömülü olanın
-  yerine geçer.
-- Her iki durumda da araç, yüklediğiniz görseli ortalayıp oranlı şekilde
-  küçültür, şeffaf bir tuval üzerine yerleştirir (ön katman) ve düz beyaz
-  opak bir arka plan üretir (arka plan katmanı) — **yalnızca o derlemenin
-  geçici çalışma kopyasına**.
-- **Tam kontrol isterseniz:** `android-icon_foreground.png` ve
-  `android-icon_background.png` dosyalarını kendiniz hazırlayıp
-  projenizin köküne (`game/` ile aynı seviyeye) eklerseniz, araç onlara
-  hiç dokunmaz, olduğu gibi kullanılırlar.
+- Dağıtım paketi olduğunu otomatik tespit edip günlüğe yazar.
+- `renpy/`, `lib/` ve `.exe` gibi masaüstüne özel dosyaları **yalnızca
+  geçici çalışma kopyasından** çıkarır (orijinal ZIP'inize dokunmaz).
+- Uygulama adı/paket/sürümü elle girdiyseniz onları kullanır.
+
+**Neden elle girmek gerekiyor?** Uygulama adı gibi bilgiler normalde
+`game/options.rpy` **metninden** okunur. Derlenmiş pakette bu dosya yoktur
+(sadece `.rpyc` bytecode vardır), bu yüzden okunamaz. Arayüzdeki
+**"Derlenmiş proje bilgileri"** bölümünü doldurursanız doğru isim/paketle
+derlenir; boş bırakırsanız araç klasör adından tahmin eder.
+
+> Elinizde ham kaynak varsa onu yüklemek her zaman daha iyidir.
 
 ---
 
-## 🔑 İmzalama anahtarı (keystore) hakkında ÖNEMLİ uyarı
+## 🔐 AeroKey lisans ekranı
 
-Bir keystore belirtmezseniz, her derlemede **rastgele/geçici** bir imzalama
-anahtarı otomatik üretilir. Bu, hızlı test kurulumları için sorun değildir.
-**Ancak:**
+Açtığınızda, oyunun **açılış ekranı** Ren'Py'nin kendi ekranı yerine Kotlin
+ile yazılmış bir lisans geçidi olur. Doğrulama geçilmeden oyun başlamaz.
 
-- Android, farklı imza anahtarıyla imzalanmış APK'leri **farklı uygulamalar**
-  olarak görür. Bugün ürettiğiniz APK'yi cihazınıza kurup yarın anahtarsız
-  tekrar derlerseniz, yeni APK eskisinin **üzerine kurulamaz** (önce
-  kaldırmanız gerekir).
-- Google Play, bir uygulamanın tüm güncellemelerinin **aynı** anahtarla
-  imzalanmasını zorunlu kılar. Rastgele üretilen bir anahtarla Play'e ilk
-  sürümü yükleyip o anahtarı kaybederseniz, o uygulamayı bir daha
-  güncelleyemezsiniz.
+### Ekranda neler var
 
-**Öneri:** Ciddi bir proje için "Gelişmiş" bölümünden kendi `.keystore`/
-`.jks` dosyanızı (alias + şifresiyle birlikte) yükleyin ve bu dosyayı
-**güvenli bir yerde saklayın** — kaybederseniz geri döndürülemez.
-Keystore dosyanız yalnızca derleme sırasında bellekte/ortam değişkeni
-olarak kullanılır, diske düz metin olarak yazılmaz.
+- **Erişim anahtarı** girişi → `GET /wp-json/lisans/v1/kontrol?anahtar=…`
+- **⭐ VIP Üyeyim** → `GET /wp-json/lisans/v1/vip-kontrol?device_id=…`
+- **🔑 Anahtar Al** → tarayıcıda `https://riaslink.fun/bilgi` sayfasını açar
+- **Cihaz kimliği + Kopyala** → VIP tanımlarken bu kimliği kullanırsınız
+- İsteğe bağlı paneller: 🏆 Liderlik, 👤 Profil, 📊 Anket, 🐞 Hata Bildir
+
+### Her zaman etkin olanlar
+
+- **Oyun süresi sayımı** — uygulama ön plandayken saniye sayar; hem bu
+  oyunun süresini hem hesabın toplam süresini `POST /sync` ile gönderir.
+  Sunucuda daha yüksek bir değer varsa (başka cihazda oynanmışsa) onu alır.
+- **Lisans yeniden denetimi** — oyun açıkken 10 dakikada bir sessizce
+  doğrular; süre dolduysa oyunu kapatıp giriş ekranına döner.
+- **Çevrimdışı tolerans** — internet yoksa, daha önce doğrulanmış lisansla
+  devam edilmesine izin verilir. Oyuncuyu geçici bir bağlantı kopukluğu
+  yüzünden kendi oyunundan kilitlemek doğru olmaz; yalnızca sunucunun
+  açıkça "geçersiz" demesi bağlayıcıdır.
+
+### Oyun kimliği (`oyun_id`)
+
+Oynama süreleri sunucuda oyun kimliğine göre saklanır. Araç, her yeni paket
+adına **kullanılmamış en küçük** kimliği verir: `riaslink_oyun_001`,
+`riaslink_oyun_002`, … Daha önce bir kimlik verilmiş bir paketi tekrar
+derlerseniz **aynı kimlik korunur** (süreler bozulmasın diye). Verilmiş bir
+kimlik asla ikinci bir oyuna otomatik atanmaz.
+
+Kimliği elle de girebilirsiniz; başka bir pakete aitse araç uyarır ama
+isteğinize uyar.
+
+### Kapsam dışı bırakılanlar
+
+İsteğiniz üzerine **kart çevirme (gacha)** ve **referans/davet** sistemleri
+için native arayüz yazılmadı. Eklentideki ilgili uç noktalar duruyor, oyun
+bunları çağırmıyor.
+
+### Teknik not: yama nereye uygulanıyor?
+
+Ren'Py, her derlemede `app/AndroidManifest.xml` ve `app/build.gradle` gibi
+dosyaları `rapt/templates/` altındaki Jinja2 şablonlarından **yeniden
+üretir**. Bu yüzden üretilmiş dosyaları düzenlemek işe yaramaz — bir sonraki
+derlemede sessizce geri alınır.
+
+`aerokey/patch_rapt.py` yamayı doğru katmana uygular:
+
+| Ne | Nereye |
+|---|---|
+| Kotlin kaynakları | `rapt/prototype/renpyandroid/src/main/java/com/riaslink/aerokey/` |
+| Kotlin Gradle eklentisi | `rapt/prototype/**/build.gradle` (bunlar üretilmiyor) |
+| Launcher değişikliği | `rapt/templates/*AndroidManifest.xml` (üretilenin **kaynağı**) |
+
+Yama Docker imajı kurulurken bir kez çalışır ve o SDK ile derlenen **her**
+oyunda geçerli olur. Şablon beklenmedik biçimde değiştiyse betik bilinçli
+olarak **hata verip imaj derlemesini durdurur** — sessizce atlanan bir yama,
+lisans ekranı olmayan bir APK üretirdi ve bu ancak oyun açıldığında fark
+edilirdi.
+
+Ekran **hiçbir yeni Gradle bağımlılığı eklemez**: ağ için `HttpURLConnection`,
+JSON için `org.json`, arayüz için programatik Android View'ları kullanır
+(hepsi Android'in içinde gelir).
+
+---
+
+## 🔑 İmzalama
+
+**Hiçbir şey yapmanıza gerek yok.** İlk derlemede kalıcı bir imza anahtarı
+üretilir ve saklanır; sonraki **tüm** derlemeler aynı anahtarla imzalanır.
+Böylece ürettiğiniz APK'ler birbirinin üzerine sorunsuz kurulur ve Play
+Store güncellemeleri çalışır.
+
+- **Yedekleyin:** "Anahtarı indir (yedekle)" düğmesiyle `.keystore`
+  dosyasını, "Alias / şifreyi göster" ile de kimlik bilgilerini alın.
+  Kaybederseniz geri getirilemez ve o uygulamayı bir daha güncelleyemezsiniz.
+- **Kendi anahtarınızı kullanmak isterseniz:** "İkon ve imzalama →
+  Bunun yerine kendi anahtarımı kullanmak istiyorum" bölümünden dosya +
+  alias + şifre girin. Üçü de dolu değilse otomatik anahtar kullanılır.
+
+---
+
+## 🖼️ Uygulama ikonu
+
+Ren'Py, Android ikonunu proje kökündeki **iki** 432×432 PNG dosyasından
+üretir: `android-icon_foreground.png` (şeffaf ön katman) ve
+`android-icon_background.png` (opak arka plan).
+
+- **Tam kontrol:** Bu iki dosyayı kendiniz hazırlayıp projenizin köküne
+  (`game/` ile aynı seviyeye) ekleyin — araç onlara hiç dokunmaz.
+- **Kolay yol:** Arayüzden tek bir kare görsel yükleyin; ortalanıp
+  oranlı küçültülür, beyaz opak arka planla eşleştirilir.
+- **Space'e gömmek:** Bu depoya `icon.png` / `icon.jpg` ekleyip yeniden
+  build alın; o andan itibaren her derlemede otomatik kullanılır.
 
 ---
 
 ## Sınırlamalar
 
-- **Her Ren'Py sürümü test edilmedi.** Ren'Py'nin Android derleme zinciri
-  (RAPT) yıllar içinde birkaç kez köklü şekilde değişti (Ant → Gradle,
-  Python 2 → 3, ayrı RAPT paketi → launcher'a entegre, JDK 8 → 21).
-  Bu Dockerfile güncel (8.x, ≥8.2.0) sürümler için Java 21 kurar; çok eski
-  bir Ren'Py sürümüyle çalışacaksanız `Dockerfile`'daki
-  `eclipse-temurin:21-jdk` satırını `eclipse-temurin:8-jdk` ile
-  değiştirmeniz gerekebilir.
-- **Uygulama adı / paket adı / sürüm numarası bu arayüzden ayarlanmaz.**
-  Bunlar Ren'Py projenizin kendi `game/options.rpy` dosyasındaki
-  `build.name`, `build.package` (ya da launcher'ın "Configure" adımında
-  girdiğiniz bilgiler) tarafından belirlenir — bu araç sadece mevcut proje
-  yapılandırmanızla derlemeyi otomatikleştirir, projenizin kimliğini
-  değiştirmez. **İki istisna:**
-  1. Ren'Py'nin Android derlemesi, `build.directory_name` (tanımlı değilse
-     `build.name`/`config.name`'den türetilir) boşluk/`:`/`;` içerirse
-     derlemeyi tamamen reddeder. Bu çok yaygın bir sorun olduğu için araç,
-     **yalnızca o derlemenin geçici çalışma kopyasında**
-     `game/options.rpy`'yi otomatik düzeltir.
-  2. Proje daha önce Ren'Py Launcher üzerinden Android için hiç
-     "Configure" edilmemişse (proje kökünde `android.json` yoksa), Ren'Py
-     "Run configure before attempting to build the app" diyerek build'i
-     reddeder. Araç bu durumda, `options.rpy`'den (varsa `build.name`,
-     `build.package`, `config.version`) türetilmiş makul varsayılanlarla
-     **yalnızca geçici çalışma kopyasına** bir `android.json` oluşturur.
-     Paket adı, aynı oyun için derlemeler arasında **sabit** kalacak
-     şekilde (rastgelelik kullanmadan) oyunun adından türetilir — ama
-     `com.renpyandroidbuilder.*` biçiminde, gerçek yayın için **uygun
-     olmayan** otomatik bir isimdir.
-
-  Her iki durumda da orijinal dosyalarınıza asla dokunulmaz ve ne
-  değiştirildiği/oluşturulduğu günlükte açıkça belirtilir. Kalıcı ve
-  size ait bir paket adı istiyorsanız (özellikle Play Store için), kendi
-  projenizde Ren'Py Launcher > Android > Configure adımını bir kez
-  tamamlayıp oluşan `android.json` dosyasını projenizin köküne (`game/`
-  ile aynı seviyeye) ekleyip zip'e dahil edin — dosya zaten varsa araç
-  ona dokunmaz, olduğu gibi kullanır.
+- **Aynı anda yalnızca bir derleme çalışır.** Bu bir zarafet tercihi değil:
+  RAPT tüm oyunlar için **tek** bir `rapt/project/` çalışma dizini kullanır,
+  paralel iki derleme birbirinin dosyalarını bozar. İkinci istek sırada bekler.
+- **Her Ren'Py sürümü test edilmedi.** RAPT yıllar içinde köklü şekilde
+  değişti (Ant → Gradle, Python 2 → 3, JDK 8 → 21). Bu Dockerfile güncel
+  (≥8.2.0) sürümler için Java 21 kurar; çok eski bir sürüm için
+  `eclipse-temurin:21-jdk` satırını `eclipse-temurin:8-jdk` yapmanız
+  gerekebilir. AeroKey yaması da yalnızca modern (Gradle tabanlı) şablonda
+  çalışır.
 - **İlk Android derlemesi yavaştır.** RAPT, Android SDK bileşenlerini
-  (build-tools, platform, gerekirse NDK) ilk gerçek derlemede ayrıca
-  indirir; imaja yalnızca Ren'Py SDK'sının kendisi gömülüdür.
-- Aynı anda yalnızca **bir** derleme çalışır (kaynak kullanımını
-  sınırlamak için); ikinci bir istek, öndeki bitene kadar kuyrukta bekler.
-- Bu Space içerik üretmiyor / barındırmıyor — yalnızca **sizin
-  yüklediğiniz** projeyi paketliyor. Yüklediğiniz oyunun hakları size ait
-  olmalı ya da paketlemeye yetkiniz olmalı.
+  (build-tools, platform, gerekirse NDK) ilk gerçek derlemede indirir.
+  Gradle'ın kendisi imaja gömülüdür, o yeniden indirilmez.
+- Bu Space içerik üretmiyor / barındırmıyor — yalnızca **sizin yüklediğiniz**
+  projeyi paketliyor. Yüklediğiniz oyunun hakları size ait olmalı.
 
 ---
 
@@ -198,12 +256,14 @@ olarak kullanılır, diske düz metin olarak yazılmaz.
 
 | Belirti | Olası neden / çözüm |
 |---|---|
-| Build "OutOfMemory" / Gradle daemon hatasıyla çöküyor | Space donanımınızda yeterli RAM yok; daha güçlü bir donanım katmanına geçin. |
-| `renutil install X.Y.Z` sürüm bulamıyor | Sürüm numarasını https://www.renpy.org/release_list.html üzerinden doğrulayın. |
-| "'game/' klasörü bulunamadı" hatası | ZIP'i, içinde `game` klasörü **görünecek** şekilde oluşturun (proje klasörünü doğrudan seçip zip'leyin). |
-| Java/Gradle sürüm uyuşmazlığı hataları | Kullandığınız Ren'Py sürümüne göre Dockerfile'daki JDK sürümünü (8 ↔ 21) güncelleyin. |
-| Günlük penceresi bazen tek satır yerine parça parça güncelleniyor | Bu, altta çalışan araçların kendi tamponlama davranışından kaynaklanır; işlevi etkilemez. |
-| Yükleme büyük ZIP dosyasını reddediyor | Kurulu Gradio sürümünün azami dosya boyutu ayarını kontrol edin/artırın. |
+| `Server returned HTTP response code: 504` (Gradle indirme) | Geçici ağ arızası. Araç bunu tanıyıp **3 kez otomatik** yeniden dener ve Gradle imaja önceden gömülüdür. Yine de olursa birkaç dakika sonra tekrar deneyin. |
+| Build "OutOfMemory" / Gradle daemon hatası | Space donanımınızda yeterli RAM yok; daha güçlü katmana geçin. |
+| `renutil install X.Y.Z` sürüm bulamıyor | Sürümü https://www.renpy.org/release_list.html üzerinden doğrulayın. |
+| "'game/' klasörü bulunamadı" | ZIP'i, içinde `game` klasörü **görünecek** şekilde oluşturun. |
+| Uygulama adı yanlış çıkıyor | Derlenmiş paket yüklemişsinizdir; "Derlenmiş proje bilgileri" alanlarını doldurun. |
+| Lisans ekranı APK'de yok | Günlükte "giriş ekranı Android projesine yerleştirildi" satırını arayın. Yoksa AeroKey anahtarı kapalıdır ya da yama uygulanamamıştır (imaj derleme günlüğüne bakın). |
+| APK eskinin üzerine kurulmuyor | Kalıcı disk kapalıysa imza anahtarı değişmiştir. Kalıcı diski açın ya da yedeklediğiniz anahtarı elle yükleyin. |
+| Java/Gradle sürüm uyuşmazlığı | Ren'Py sürümünüze göre Dockerfile'daki JDK sürümünü (8 ↔ 21) güncelleyin. |
 
 ---
 
@@ -211,6 +271,6 @@ olarak kullanılır, diske düz metin olarak yazılmaz.
 
 - [Ren'Py](https://www.renpy.org/) — MIT lisans
 - [renkit](https://github.com/kobaltcore/renkit) (kobaltcore) — MIT lisans,
-  bu Space'in derleme otomasyonunun temelini oluşturuyor
-- Bu Space'in kendi kodu (`app.py`, `Dockerfile`) da MIT lisansıyla
-  paylaşılabilir; dilediğiniz gibi değiştirip kullanabilirsiniz.
+  bu Space'in derleme otomasyonunun temeli
+- AeroKey Lisans Yöneticisi (Riaslink) — bu Space'in konuştuğu WordPress eklentisi
+- Bu Space'in kendi kodu da MIT lisansıyla paylaşılabilir.

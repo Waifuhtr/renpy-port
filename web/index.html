@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ren'Py → Android Paketleyici</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="aurora" aria-hidden="true">
+  <span class="orb orb-a"></span>
+  <span class="orb orb-b"></span>
+  <span class="orb orb-c"></span>
+</div>
+
+<header class="masthead">
+  <div class="brand">
+    <span class="brand-mark">▲</span>
+    <div>
+      <h1>Ren'Py → Android</h1>
+      <p>APK / AAB paketleyici · AeroKey lisans entegrasyonu</p>
+    </div>
+  </div>
+  <div class="masthead-meta" id="masthead-meta"></div>
+</header>
+
+<main class="layout">
+
+  <!-- ================= SOL: FORM ================= -->
+  <form id="build-form" class="panel" autocomplete="off">
+
+    <section class="card">
+      <h2><span class="step">1</span> Proje</h2>
+
+      <label class="field">
+        <span class="label">Ren'Py proje ZIP dosyası</span>
+        <div class="dropzone" id="dropzone">
+          <input type="file" id="project_zip" name="project_zip" accept=".zip" required>
+          <div class="dropzone-inner">
+            <strong id="zip-name">Dosyayı sürükleyin ya da seçin</strong>
+            <small>İçinde <code>game/</code> klasörü olan klasörü zip'leyin</small>
+          </div>
+        </div>
+      </label>
+
+      <div class="grid-2">
+        <label class="field">
+          <span class="label">Ren'Py sürümü</span>
+          <input type="text" id="renpy_version" name="renpy_version" placeholder="8.5.3">
+          <small class="hint" id="version-hint"></small>
+        </label>
+        <label class="field">
+          <span class="label">Paket adı öneki</span>
+          <input type="text" id="package_prefix" name="package_prefix" value="com.riaslinkfun">
+          <small class="hint">Projede <code>build.package</code> yoksa kullanılır</small>
+        </label>
+      </div>
+
+      <div class="field">
+        <span class="label">Çıktı formatı</span>
+        <div class="toggle-row">
+          <label class="chk">
+            <input type="checkbox" id="want_apk" name="want_apk" checked>
+            <span>APK <em>yan yükleme / test</em></span>
+          </label>
+          <label class="chk">
+            <input type="checkbox" id="want_aab" name="want_aab">
+            <span>AAB <em>Google Play</em></span>
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- Derlenmiş proje ---------- -->
+    <details class="card collapsible">
+      <summary>
+        <h2><span class="step">2</span> Derlenmiş proje bilgileri</h2>
+        <span class="summary-note">isteğe bağlı</span>
+      </summary>
+      <div class="collapsible-body">
+        <p class="explain">
+          Ren'Py Launcher'ın <b>Build Distributions</b> çıktısını (yalnızca
+          <code>.rpyc</code> içeren, <code>renpy/</code> ve <code>lib/</code>
+          klasörleriyle gelen paket) yüklediyseniz, uygulama adı/paket/sürüm
+          kaynaktan okunamaz. Bu alanları doldurursanız onlar kullanılır;
+          boş bırakırsanız araç elinden geleni yapar.
+        </p>
+        <div class="grid-2">
+          <label class="field">
+            <span class="label">Uygulama adı</span>
+            <input type="text" id="manual_name" name="manual_name" placeholder="Oyunumun Adı">
+          </label>
+          <label class="field">
+            <span class="label">Sürüm</span>
+            <input type="text" id="manual_version" name="manual_version" placeholder="1.0.0">
+          </label>
+        </div>
+        <label class="field">
+          <span class="label">Tam paket adı</span>
+          <input type="text" id="manual_package" name="manual_package" placeholder="com.riaslinkfun.oyunum">
+          <small class="hint">En az iki bölüm gerekir. Boşsa önekten türetilir.</small>
+        </label>
+      </div>
+    </details>
+
+    <!-- ---------- AeroKey ---------- -->
+    <section class="card">
+      <h2><span class="step">3</span> AeroKey lisans ekranı</h2>
+
+      <label class="switch-row">
+        <input type="checkbox" id="aerokey_enabled" name="aerokey_enabled">
+        <span class="switch" aria-hidden="true"></span>
+        <span class="switch-text">
+          <strong>Oyuna giriş/lisans ekranı ekle</strong>
+          <small>Kotlin ile yazılmış native ekran, oyundan önce açılır</small>
+        </span>
+      </label>
+
+      <div id="aerokey-body" class="aerokey-body" hidden>
+        <div class="grid-2">
+          <label class="field">
+            <span class="label">WordPress site adresi</span>
+            <input type="url" id="aerokey_base_url" name="aerokey_base_url">
+          </label>
+          <label class="field">
+            <span class="label">"Anahtar Al" sayfası</span>
+            <input type="url" id="aerokey_key_page" name="aerokey_key_page">
+          </label>
+        </div>
+
+        <label class="field">
+          <span class="label">Oyun kimliği (oyun_id)</span>
+          <div class="input-with-button">
+            <input type="text" id="aerokey_game_id" name="aerokey_game_id" placeholder="riaslink_oyun_001">
+            <button type="button" class="mini" id="refresh-game-id">Yenile</button>
+          </div>
+          <small class="hint">
+            Oynama süreleri bu kimliğe göre saklanır. Boş bırakırsanız
+            kullanılmamış ilk numara otomatik atanır; daha önce bu pakete
+            atanmış bir kimlik varsa o korunur.
+          </small>
+        </label>
+
+        <div class="field">
+          <span class="label">Ek paneller</span>
+          <div class="toggle-grid">
+            <label class="chk"><input type="checkbox" id="aerokey_leaderboard" name="aerokey_leaderboard"><span>🏆 Liderlik</span></label>
+            <label class="chk"><input type="checkbox" id="aerokey_profile" name="aerokey_profile"><span>👤 Profil</span></label>
+            <label class="chk"><input type="checkbox" id="aerokey_survey" name="aerokey_survey"><span>📊 Anket</span></label>
+            <label class="chk"><input type="checkbox" id="aerokey_bug_report" name="aerokey_bug_report"><span>🐞 Hata bildir</span></label>
+          </div>
+          <small class="hint">
+            Oyun süresi sayımı ve lisans doğrulaması her zaman etkindir;
+            bunlar yalnızca giriş ekranındaki ek düğmelerdir.
+          </small>
+        </div>
+
+        <div class="callout">
+          <strong>Not</strong> AeroKey açıkken <code>INTERNET</code> izni
+          <code>android.json</code> dosyasına otomatik eklenir. Cihaz kimliği
+          giriş ekranında kopyalanabilir — VIP tanımlarken bu kimliği
+          kullanırsınız.
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- Gelişmiş ---------- -->
+    <details class="card collapsible">
+      <summary>
+        <h2><span class="step">4</span> İkon ve imzalama</h2>
+        <span class="summary-note">isteğe bağlı</span>
+      </summary>
+      <div class="collapsible-body">
+
+        <label class="field">
+          <span class="label">Uygulama ikonu</span>
+          <input type="file" id="icon" name="icon" accept="image/*">
+          <small class="hint">
+            Tek kare görsel yeterli; iki katmanlı adaptif ikon otomatik üretilir.
+            Boşsa Space'e gömülü <code>icon.png</code>, o da yoksa Ren'Py
+            varsayılanı kullanılır.
+          </small>
+        </label>
+
+        <div class="callout callout-good" id="signing-callout">
+          <strong>İmzalama otomatik</strong>
+          Kalıcı bir anahtar bir kez üretilir ve <b>her derlemede aynısı</b>
+          kullanılır; ürettiğiniz APK'ler birbirinin üzerine sorunsuz kurulur.
+          Hiçbir şey yapmanıza gerek yok.
+          <div class="callout-actions">
+            <button type="button" class="mini" id="download-keystore">Anahtarı indir (yedekle)</button>
+            <button type="button" class="mini ghost" id="show-keystore-info">Alias / şifreyi göster</button>
+          </div>
+          <div id="keystore-info" class="keystore-info" hidden></div>
+        </div>
+
+        <details class="sub">
+          <summary>Bunun yerine kendi anahtarımı kullanmak istiyorum</summary>
+          <div class="sub-body">
+            <label class="field">
+              <span class="label">.keystore / .jks dosyası</span>
+              <input type="file" id="keystore" name="keystore" accept=".keystore,.jks">
+            </label>
+            <div class="grid-2">
+              <label class="field">
+                <span class="label">Alias</span>
+                <input type="text" id="keystore_alias" name="keystore_alias">
+              </label>
+              <label class="field">
+                <span class="label">Şifre</span>
+                <input type="password" id="keystore_password" name="keystore_password">
+              </label>
+            </div>
+            <small class="hint">Üçü de dolu değilse otomatik anahtar kullanılır.</small>
+          </div>
+        </details>
+
+      </div>
+    </details>
+
+    <button type="submit" class="primary" id="build-btn">
+      <span class="btn-label">Android Paketini Oluştur</span>
+    </button>
+    <p class="queue-note">Aynı anda tek derleme çalışır; ikinci istek sırada bekler.</p>
+  </form>
+
+  <!-- ================= SAĞ: GÜNLÜK ================= -->
+  <section class="panel console-panel">
+    <div class="console-head">
+      <div class="status-pill" id="status-pill" data-state="idle">
+        <span class="dot"></span><span id="status-text">Hazır</span>
+      </div>
+      <div class="console-actions">
+        <button type="button" class="mini ghost" id="copy-log">Kopyala</button>
+        <button type="button" class="mini ghost" id="clear-log">Temizle</button>
+      </div>
+    </div>
+
+    <pre class="console" id="console"><span class="console-empty">Derleme günlüğü burada canlı olarak akacak.</span></pre>
+
+    <div class="results" id="results" hidden>
+      <h3>İndirilebilir dosyalar</h3>
+      <div id="results-list"></div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footnote">
+  Derleme zinciri: <a href="https://github.com/kobaltcore/renkit" target="_blank" rel="noopener">renkit</a>
+  (renutil + renconstruct) → Ren'Py RAPT → Gradle. Bu araç yalnızca sizin
+  yüklediğiniz projeyi paketler.
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

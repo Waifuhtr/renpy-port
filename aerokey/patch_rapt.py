@@ -1,0 +1,666 @@
+#!/usr/bin/env python3
+"""
+Ren'Py SDK'sının Android şablonuna (RAPT) AeroKey giriş ekranını enjekte eder.
+
+NEDEN BÖYLE BİR ŞEY GEREKİYOR?
+------------------------------
+Ren'Py, bir oyunu Android'e paketlerken SDK içindeki hazır bir Android
+Studio/Gradle projesini kullanır:
+
+    <sdk>/rapt/prototype/   -> salt okunur ŞABLON (SDK ile birlikte gelir)
+    <sdk>/rapt/templates/   -> Jinja2 şablonları (manifest, build.gradle, ...)
+    <sdk>/rapt/project/     -> ilk derlemede prototype'tan kopyalanan ÇALIŞMA kopyası
+
+Önemli ayrıntı: `rapt/project/` bir kez oluşturulup sonraki derlemelerde
+yeniden kullanılır; ama `app/src/main/AndroidManifest.xml`, `app/build.gradle`
+ve `res/values/strings.xml` gibi dosyalar HER derlemede `rapt/templates/`
+içindeki Jinja2 şablonlarından yeniden üretilir. Yani üretilmiş dosyaları
+düzenlemek işe yaramaz — bir sonraki derlemede sessizce geri alınır.
+
+Bu yüzden yamayı DOĞRU KATMANA uyguluyoruz:
+  * Kotlin kaynakları  -> rapt/prototype/renpyandroid/src/main/java/...
+  * Kotlin eklentisi   -> rapt/prototype/**/build.gradle (bunlar üretilmiyor)
+  * Manifest değişikliği -> rapt/templates/*AndroidManifest.xml (üretilen dosyanın KAYNAĞI)
+
+Böylece Docker imajı kurulurken bir kez uygulanan yama, o SDK ile derlenen
+HER oyunda otomatik olarak geçerli olur.
+
+Kullanım:
+    python3 patch_rapt.py                 # SDK'yı bulup yamayı uygular
+    python3 patch_rapt.py --sdk /yol/sdk  # belirli bir SDK'ya uygular
+    python3 patch_rapt.py --warm-gradle   # Gradle dağıtımını önden indirir
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Iterable, Optional
+
+# Yamanın daha önce uygulandığını anlamak için kullandığımız imza.
+MARKER = "AEROKEY-PATCH"
+
+KOTLIN_PACKAGE_PATH = "com/riaslink/aerokey"
+GATE_ACTIVITY = "com.riaslink.aerokey.AeroKeyGateActivity"
+
+DEFAULT_KOTLIN_VERSION = "2.2.20"
+
+# Kotlin kaynaklarının bu betiğe göre konumu.
+KOTLIN_SOURCE_DIR = Path(__file__).resolve().parent / "kotlin"
+
+
+class PatchError(RuntimeError):
+    """Yama güvenli biçimde uygulanamadığında yükseltilir.
+
+    Bunu bilinçli olarak ÖLÜMCÜL bir hata yapıyoruz: sessizce atlanan bir
+    yama, lisans ekranı olmayan bir APK üretir ve bu ancak kullanıcı oyunu
+    açtığında fark edilir. Docker imajı derlenirken gürültülü biçimde
+    patlaması çok daha iyidir.
+    """
+
+
+# ---------------------------------------------------------------------------
+# SDK bulma
+# ---------------------------------------------------------------------------
+
+def candidate_bases() -> Iterable[Path]:
+    """renutil'in Ren'Py SDK'larını kurabileceği bilinen dizinler."""
+    env = os.environ.get("RENUTIL_HOME")
+    if env:
+        yield Path(env)
+    home = Path.home()
+    yield home / ".local" / "share" / "renutil"
+    yield home / ".cache" / "renutil"
+    yield Path("/root/.local/share/renutil")
+    yield Path("/root/.cache/renutil")
+
+
+def find_sdk_roots() -> list[Path]:
+    """İçinde `rapt/` bulunan tüm Ren'Py SDK dizinlerini döner."""
+    found: list[Path] = []
+    seen: set[Path] = set()
+
+    for base in candidate_bases():
+        if not base.is_dir():
+            continue
+        # Hem base'in kendisi hem de tek seviye altındaki sürüm klasörleri.
+        for candidate in [base, *sorted(p for p in base.iterdir() if p.is_dir())]:
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if (resolved / "rapt").is_dir():
+                found.append(resolved)
+
+    return found
+
+
+def resolve_sdk(explicit: Optional[str]) -> Path:
+    if explicit:
+        sdk = Path(explicit).expanduser().resolve()
+        if not (sdk / "rapt").is_dir():
+            raise PatchError(f"{sdk} altında bir 'rapt' klasörü yok — burası bir Ren'Py SDK'sı değil.")
+        return sdk
+
+    roots = find_sdk_roots()
+    if not roots:
+        raise PatchError(
+            "Ren'Py SDK bulunamadı. Aranan yerler: "
+            + ", ".join(str(b) for b in candidate_bases())
+            + ". --sdk ile açıkça belirtebilirsiniz."
+        )
+    if len(roots) > 1:
+        print(f"[aerokey] {len(roots)} SDK bulundu, hepsi yamalanacak.")
+    return roots[0]
+
+
+# ---------------------------------------------------------------------------
+# Küçük dosya yardımcıları
+# ---------------------------------------------------------------------------
+
+def read(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def find_files(root: Path, predicate) -> list[Path]:
+    matches: list[Path] = []
+    for path in root.rglob("*"):
+        try:
+            if path.is_file() and predicate(path):
+                matches.append(path)
+        except OSError:
+            continue
+    return matches
+
+
+# ---------------------------------------------------------------------------
+# 1) Kotlin kaynaklarını yerleştir
+# ---------------------------------------------------------------------------
+
+def kotlin_target_dirs(sdk: Path) -> list[Path]:
+    """
+    Kotlin kaynaklarının kopyalanacağı tüm konumlar.
+
+    `prototype` her zaman hedeftir (ilk derlemede buradan kopyalanır);
+    `project` yalnızca daha önce bir derleme yapıldıysa vardır ve prototype'tan
+    otomatik tazelenmediği için oraya da yazmamız gerekir.
+    """
+    targets = []
+    for module_root in (sdk / "rapt" / "prototype", sdk / "rapt" / "project"):
+        module = module_root / "renpyandroid" / "src" / "main" / "java"
+        if module_root.is_dir():
+            targets.append(module / KOTLIN_PACKAGE_PATH)
+    return targets
+
+
+def install_kotlin_sources(sdk: Path) -> int:
+    if not KOTLIN_SOURCE_DIR.is_dir():
+        raise PatchError(f"Kotlin kaynak klasörü bulunamadı: {KOTLIN_SOURCE_DIR}")
+
+    sources = sorted(KOTLIN_SOURCE_DIR.glob("*.kt"))
+    if not sources:
+        raise PatchError(f"{KOTLIN_SOURCE_DIR} içinde .kt dosyası yok.")
+
+    count = 0
+    for target in kotlin_target_dirs(sdk):
+        target.mkdir(parents=True, exist_ok=True)
+        for src in sources:
+            shutil.copy2(src, target / src.name)
+            count += 1
+        print(f"[aerokey] {len(sources)} Kotlin dosyası -> {target}")
+    return count
+
+
+# ---------------------------------------------------------------------------
+# 2) Gradle: Kotlin eklentisini devreye al
+# ---------------------------------------------------------------------------
+
+def detect_kotlin_version(sdk: Path) -> str:
+    """
+    Şablonda zaten bulunan kotlin-stdlib sürümünü yakalayıp eklenti sürümü
+    olarak kullanırız. Böylece Ren'Py sürüm yükselttiğinde biz de otomatik
+    uyum sağlarız ve stdlib/derleyici sürüm uyuşmazlığı yaşanmaz.
+    """
+    pattern = re.compile(r"org\.jetbrains\.kotlin:kotlin-stdlib[\w-]*:([\d.]+)")
+    for gradle_file in (sdk / "rapt").rglob("*.gradle"):
+        try:
+            match = pattern.search(read(gradle_file))
+        except OSError:
+            continue
+        if match:
+            return match.group(1)
+    return DEFAULT_KOTLIN_VERSION
+
+
+def detect_jvm_target(text: str) -> str:
+    """Modülün Java hedefini bulup Kotlin'i aynı hedefe ayarlayabilelim."""
+    match = re.search(r"targetCompatibility\s*=?\s*JavaVersion\.VERSION_(\d+)", text)
+    if match:
+        return match.group(1)
+    match = re.search(r"targetCompatibility\s*=?\s*['\"]?(\d+)", text)
+    if match:
+        return match.group(1)
+    return "17"
+
+
+def patch_root_gradle(sdk: Path, kotlin_version: str) -> bool:
+    """Kök build.gradle'a Kotlin eklentisini (apply false) tanıtır."""
+    root_gradle = sdk / "rapt" / "prototype" / "build.gradle"
+    if not root_gradle.is_file():
+        raise PatchError(f"Kök build.gradle bulunamadı: {root_gradle}")
+
+    text = read(root_gradle)
+    if MARKER in text:
+        print("[aerokey] Kök build.gradle zaten yamalı, atlanıyor.")
+        return False
+
+    if "org.jetbrains.kotlin.android" in text:
+        print("[aerokey] Kök build.gradle Kotlin eklentisini zaten tanıyor.")
+        return False
+
+    plugins_match = re.search(r"plugins\s*\{", text)
+    if plugins_match:
+        insert_at = plugins_match.end()
+        addition = (
+            f"\n    // {MARKER}: AeroKey giriş ekranı Kotlin ile yazıldı.\n"
+            f"    id 'org.jetbrains.kotlin.android' version '{kotlin_version}' apply false\n"
+        )
+        text = text[:insert_at] + addition + text[insert_at:]
+    else:
+        # Eski tarz buildscript{} kullanan şablonlar için classpath ekle.
+        buildscript_deps = re.search(r"buildscript\s*\{[\s\S]*?dependencies\s*\{", text)
+        if not buildscript_deps:
+            raise PatchError(
+                f"{root_gradle} içinde ne 'plugins {{' ne de 'buildscript {{ dependencies {{' "
+                "bloğu bulunabildi; şablon beklenmedik biçimde değişmiş olabilir."
+            )
+        insert_at = buildscript_deps.end()
+        addition = (
+            f"\n        // {MARKER}\n"
+            f"        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:{kotlin_version}'\n"
+        )
+        text = text[:insert_at] + addition + text[insert_at:]
+
+    write(root_gradle, text)
+    print(f"[aerokey] Kök build.gradle yamalandı (Kotlin {kotlin_version}).")
+    return True
+
+
+def patch_module_gradle(sdk: Path) -> bool:
+    """
+    renpyandroid modülüne Kotlin eklentisini uygular.
+
+    Bu dosya Jinja2 şablonundan ÜRETİLMEDİĞİ için buraya yazdığımız yama
+    kalıcıdır (app/build.gradle'ın aksine).
+    """
+    module_gradle = sdk / "rapt" / "prototype" / "renpyandroid" / "build.gradle"
+    if not module_gradle.is_file():
+        raise PatchError(f"renpyandroid/build.gradle bulunamadı: {module_gradle}")
+
+    text = read(module_gradle)
+    if MARKER in text:
+        print("[aerokey] renpyandroid/build.gradle zaten yamalı, atlanıyor.")
+        return False
+
+    jvm_target = detect_jvm_target(text)
+
+    plugins_match = re.search(r"plugins\s*\{", text)
+    if plugins_match:
+        # Kotlin eklentisini Android eklentisinden SONRA uyguluyoruz.
+        # Kotlin'in Android eklentisi, kendisinden önce bir Android
+        # eklentisinin uygulanmış olmasını bekler; sırayı ters kurmak
+        # bazı sürümlerde "Android Gradle plugin was not applied" hatası
+        # verir.
+        android_plugin = re.search(
+            r"^[ \t]*id\s+['\"]com\.android\.(library|application)['\"].*$",
+            text[plugins_match.end():],
+            re.MULTILINE,
+        )
+        if android_plugin:
+            insert_at = plugins_match.end() + android_plugin.end()
+        else:
+            insert_at = plugins_match.end()
+        text = (
+            text[:insert_at]
+            + f"\n    // {MARKER}\n    id 'org.jetbrains.kotlin.android'"
+            + text[insert_at:]
+        )
+    else:
+        apply_match = re.search(r"apply\s+plugin:\s*['\"]com\.android\.library['\"]", text)
+        if not apply_match:
+            raise PatchError(
+                f"{module_gradle} içinde Kotlin eklentisinin ekleneceği yer bulunamadı."
+            )
+        insert_at = apply_match.end()
+        text = (
+            text[:insert_at]
+            + f"\n// {MARKER}\napply plugin: 'org.jetbrains.kotlin.android'"
+            + text[insert_at:]
+        )
+
+    # Kotlin'in JVM hedefini Java'nınkiyle hizala; aksi halde AGP
+    # "Inconsistent JVM-target compatibility" hatasıyla derlemeyi durdurur.
+    text += (
+        f"\n\n// {MARKER}: Kotlin ve Java aynı JVM hedefinde olmalı.\n"
+        "kotlin {\n"
+        "    compilerOptions {\n"
+        f"        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_{jvm_target}\n"
+        "    }\n"
+        "}\n"
+    )
+
+    write(module_gradle, text)
+    print(f"[aerokey] renpyandroid/build.gradle yamalandı (jvmTarget {jvm_target}).")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# 3) Manifest şablonu: giriş ekranını launcher yap
+# ---------------------------------------------------------------------------
+
+GATE_ACTIVITY_XML = f"""
+        <!-- {MARKER}: AeroKey lisans geçidi. Uygulamanın açılış ekranı
+             budur; doğrulama başarılı olunca Ren'Py'nin kendi
+             PythonSDLActivity ekranını kendisi başlatır. -->
+        <activity
+            android:name="{GATE_ACTIVITY}"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+"""
+
+
+def find_manifest_template(sdk: Path) -> Path:
+    """
+    Üretilen app manifestinin kaynağı olan Jinja2 şablonunu bulur.
+
+    İsimlendirme Ren'Py sürümleri arasında değişebildiği için dosya adına
+    değil, İÇERİĞE bakıyoruz: hem `<application` hem de bir LAUNCHER
+    kategorisi içeren şablon aradığımız dosyadır.
+    """
+    templates_dir = sdk / "rapt" / "templates"
+    search_roots = [templates_dir] if templates_dir.is_dir() else [sdk / "rapt"]
+
+    def looks_like_app_manifest(path: Path) -> bool:
+        if "androidmanifest" not in path.name.lower():
+            return False
+        try:
+            text = read(path)
+        except OSError:
+            return False
+        return "<application" in text and "android.intent.category.LAUNCHER" in text
+
+    matches: list[Path] = []
+    for root in search_roots:
+        matches.extend(find_files(root, looks_like_app_manifest))
+
+    # rapt/project/ altındaki ÜRETİLMİŞ kopyaları eleriz: onlara yazmak
+    # bir sonraki derlemede geri alınır.
+    matches = [m for m in matches if "/project/" not in str(m).replace(os.sep, "/")]
+
+    if not matches:
+        raise PatchError(
+            "LAUNCHER içeren bir AndroidManifest şablonu bulunamadı. "
+            f"Aranan yer: {[str(r) for r in search_roots]}"
+        )
+    if len(matches) > 1:
+        # En olası aday: adında 'app' geçen.
+        preferred = [m for m in matches if "app" in m.name.lower()]
+        if len(preferred) == 1:
+            return preferred[0]
+        raise PatchError(
+            "Birden fazla aday manifest şablonu bulundu, hangisinin "
+            f"yamalanacağı belirsiz: {[str(m) for m in matches]}"
+        )
+    return matches[0]
+
+
+def patch_manifest_template(sdk: Path) -> bool:
+    template = find_manifest_template(sdk)
+    text = read(template)
+
+    if MARKER in text:
+        print(f"[aerokey] Manifest şablonu zaten yamalı: {template}")
+        return False
+
+    launcher_count = text.count("android.intent.category.LAUNCHER")
+    if launcher_count == 0:
+        raise PatchError(f"{template} içinde LAUNCHER kategorisi yok.")
+
+    # Mevcut launcher kategorilerini tamamen kaldırıyoruz. Bunları DEFAULT'a
+    # çevirmek de mümkündü, ama LAUNCHER ve LEANBACK_LAUNCHER aynı
+    # intent-filter içinde yan yana durduğunda iki özdeş DEFAULT satırı
+    # oluşurdu. Kategorinin silinmesi, activity'yi yalnızca uygulama
+    # çekmecesinden çıkarır; kod içinden açıkça başlatılmaya devam eder —
+    # geçidimiz de tam olarak bunu yapıyor.
+    category_re = re.compile(
+        r"[ \t]*<category\s+[^>]*android:name\s*=\s*"
+        r"[\"']android\.intent\.category\.(?:LEANBACK_)?LAUNCHER[\"']"
+        r"[^>]*(?:/>|>\s*</category>)[ \t]*\r?\n?",
+        re.IGNORECASE,
+    )
+    text, removed = category_re.subn("", text)
+    if removed == 0:
+        raise PatchError(
+            f"{template} içindeki LAUNCHER kategorisi tanınan bir biçimde "
+            "değil, güvenle kaldırılamadı."
+        )
+
+    # Geçit activity'sini </application> kapanışından hemen önce, o satırın
+    # kendi girintisini koruyarak ekle.
+    closing = re.search(r"([ \t]*)</application>", text)
+    if not closing:
+        raise PatchError(f"{template} içinde </application> etiketi bulunamadı.")
+    text = (
+        text[: closing.start()]
+        + GATE_ACTIVITY_XML.rstrip("\n")
+        + "\n\n"
+        + closing.group(1)
+        + "</application>"
+        + text[closing.end():]
+    )
+
+    # --- Doğrulama: geriye kalan TEK launcher bizimki olmalı -------------
+    # Beklenen sayıyı sabit yazmak yerine eklediğimiz bloktan sayıyoruz;
+    # blok ileride değişirse doğrulama da kendiliğinden uyum sağlar.
+    for category in ("LAUNCHER", "LEANBACK_LAUNCHER"):
+        needle = f"android.intent.category.{category}"
+        expected = GATE_ACTIVITY_XML.count(needle)
+        actual = text.count(needle)
+        if actual != expected:
+            raise PatchError(
+                f"Manifest yaması beklenen sonucu vermedi: yamadan sonra "
+                f"{actual} adet {category} kaydı var ({expected} bekleniyordu). "
+                "Şablon biçimi değişmiş olabilir, yama güvenli değil."
+            )
+    if GATE_ACTIVITY not in text:
+        raise PatchError("Geçit activity'si manifeste eklenemedi.")
+
+    write(template, text)
+    print(f"[aerokey] Manifest şablonu yamalandı: {template}")
+    print(f"[aerokey]   -> launcher artık {GATE_ACTIVITY}")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# 4) Derleme başına yapılandırma damgalama
+# ---------------------------------------------------------------------------
+
+def _kotlin_literal(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    escaped = (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("$", "\\$")
+        .replace("\n", " ")
+    )
+    return f'"{escaped}"'
+
+
+def render_config(values: dict) -> str:
+    """AeroKeyConfig.kt dosyasının içeriğini üretir."""
+    defaults = {
+        "ENABLED": False,
+        "BASE_URL": "https://riaslink.fun",
+        "KEY_PAGE_URL": "https://riaslink.fun/bilgi",
+        "GAME_ID": "riaslink_oyun_001",
+        "GAME_TITLE": "Ren'Py Game",
+        "FEATURE_LEADERBOARD": False,
+        "FEATURE_SURVEY": False,
+        "FEATURE_PROFILE": False,
+        "FEATURE_BUG_REPORT": False,
+        "SYNC_INTERVAL_SECONDS": 60,
+        "LICENSE_RECHECK_SECONDS": 600,
+        "NETWORK_TIMEOUT_MS": 15000,
+    }
+    defaults.update(values or {})
+
+    types = {
+        "ENABLED": "Boolean",
+        "BASE_URL": "String",
+        "KEY_PAGE_URL": "String",
+        "GAME_ID": "String",
+        "GAME_TITLE": "String",
+        "FEATURE_LEADERBOARD": "Boolean",
+        "FEATURE_SURVEY": "Boolean",
+        "FEATURE_PROFILE": "Boolean",
+        "FEATURE_BUG_REPORT": "Boolean",
+        "SYNC_INTERVAL_SECONDS": "Int",
+        "LICENSE_RECHECK_SECONDS": "Int",
+        "NETWORK_TIMEOUT_MS": "Int",
+    }
+
+    lines = [
+        "package com.riaslink.aerokey",
+        "",
+        "// Bu dosya Ren'Py Android Paketleyici tarafından HER DERLEMEDE",
+        "// yeniden üretilir. Elle yapılan değişiklikler korunmaz.",
+        "internal object AeroKeyConfig {",
+    ]
+    for name, kotlin_type in types.items():
+        lines.append(f"    const val {name}: {kotlin_type} = {_kotlin_literal(defaults[name])}")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def stamp_config(sdk: Path, values: dict) -> list[Path]:
+    """
+    Derlemeye özel AeroKeyConfig.kt dosyasını, ilgili TÜM konumlara yazar.
+
+    Hem `prototype` (ilk derleme buradan kopyalanır) hem de varsa `project`
+    (sonraki derlemeler burayı kullanır ve prototype'tan tazelenmez)
+    güncellenmelidir; yalnızca birine yazmak eski yapılandırmayla derleme
+    yapılmasına yol açar.
+    """
+    content = render_config(values)
+    written: list[Path] = []
+    for target_dir in kotlin_target_dirs(sdk):
+        target_dir.mkdir(parents=True, exist_ok=True)
+        path = target_dir / "AeroKeyConfig.kt"
+        write(path, content)
+        written.append(path)
+    return written
+
+
+# ---------------------------------------------------------------------------
+# 5) Gradle dağıtımını önden indirme
+# ---------------------------------------------------------------------------
+
+def warm_gradle(sdk: Path, attempts: int = 4) -> bool:
+    """
+    Gradle wrapper'ın indireceği dağıtımı, imaj derlenirken önden çeker.
+
+    Kullanıcının yaşadığı hata tam olarak buydu: ilk gerçek derlemede
+    wrapper `gradle-9.1.0-bin.zip` dosyasını indirmeye çalışıyor ve sunucu
+    504 dönünce tüm derleme çöküyordu. Wrapper'ı burada bir kez çalıştırmak,
+    dağıtımı GRADLE_USER_HOME önbelleğine yerleştirir; çalışma anında
+    indirilecek bir şey kalmaz.
+    """
+    wrappers = sorted(
+        p for p in (sdk / "rapt").rglob("gradlew")
+        if p.is_file() and "/project/" not in str(p).replace(os.sep, "/")
+    )
+    if not wrappers:
+        print("[aerokey] UYARI: gradlew bulunamadı, Gradle ön belleklemesi atlanıyor.")
+        return False
+
+    wrapper = wrappers[0]
+    try:
+        wrapper.chmod(0o755)
+    except OSError:
+        pass
+
+    env = dict(os.environ)
+    env.setdefault("GRADLE_USER_HOME", "/opt/gradle-home")
+    Path(env["GRADLE_USER_HOME"]).mkdir(parents=True, exist_ok=True)
+
+    for attempt in range(1, attempts + 1):
+        print(f"[aerokey] Gradle dağıtımı indiriliyor (deneme {attempt}/{attempts})…")
+        result = subprocess.run(
+            [str(wrapper), "--version", "--no-daemon"],
+            cwd=str(wrapper.parent),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            print("[aerokey] Gradle önbelleğe alındı:")
+            for line in result.stdout.splitlines():
+                if line.strip().startswith("Gradle "):
+                    print(f"[aerokey]   {line.strip()}")
+            return True
+
+        tail = (result.stdout + result.stderr).strip().splitlines()[-6:]
+        print(f"[aerokey] Deneme {attempt} başarısız:")
+        for line in tail:
+            print(f"[aerokey]   {line}")
+        if attempt < attempts:
+            delay = 2 ** attempt
+            print(f"[aerokey] {delay} sn beklenip yeniden denenecek…")
+            time.sleep(delay)
+
+    # Bu ölümcül DEĞİL: dağıtım çalışma anında da indirilebilir; yalnızca
+    # ilk derleme yavaş olur ve ağ sorununa açık kalır.
+    print("[aerokey] UYARI: Gradle önden indirilemedi. İlk derleme daha yavaş olabilir.")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Giriş noktası
+# ---------------------------------------------------------------------------
+
+def apply_all(sdk: Path, skip_gradle_warm: bool = False) -> None:
+    print(f"[aerokey] SDK yamalanıyor: {sdk}")
+    kotlin_version = detect_kotlin_version(sdk)
+
+    install_kotlin_sources(sdk)
+    patch_root_gradle(sdk, kotlin_version)
+    patch_module_gradle(sdk)
+    patch_manifest_template(sdk)
+
+    # Varsayılan (devre dışı) yapılandırmayı yaz ki, paketleyici herhangi bir
+    # şey damgalamadan derleme yapılsa bile proje derlenebilsin.
+    stamp_config(sdk, {"ENABLED": False})
+
+    if not skip_gradle_warm:
+        warm_gradle(sdk)
+
+    print("[aerokey] Yama tamamlandı.")
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="RAPT şablonuna AeroKey geçidini ekler.")
+    parser.add_argument("--sdk", help="Ren'Py SDK kök dizini (varsayılan: otomatik bul)")
+    parser.add_argument("--all", action="store_true", help="Bulunan tüm SDK'ları yamala")
+    parser.add_argument("--warm-gradle", action="store_true",
+                        help="Yalnızca Gradle dağıtımını önden indir")
+    parser.add_argument("--skip-gradle-warm", action="store_true",
+                        help="Gradle ön belleklemesini atla")
+    args = parser.parse_args(argv)
+
+    try:
+        if args.all and not args.sdk:
+            sdks = find_sdk_roots()
+            if not sdks:
+                raise PatchError("Yamalanacak SDK bulunamadı.")
+        else:
+            sdks = [resolve_sdk(args.sdk)]
+
+        for sdk in sdks:
+            if args.warm_gradle:
+                warm_gradle(sdk)
+            else:
+                apply_all(sdk, skip_gradle_warm=args.skip_gradle_warm)
+    except PatchError as exc:
+        print(f"[aerokey] HATA: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

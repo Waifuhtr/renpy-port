@@ -1,0 +1,144 @@
+package com.riaslink.aerokey
+
+import android.annotation.SuppressLint
+import android.content.Context
+import android.content.SharedPreferences
+import android.provider.Settings
+import java.util.UUID
+
+/**
+ * Cihaz üzerinde saklanan AeroKey durumu (lisans, kullanıcı adı, biriken
+ * oynama süresi). Tümü uygulamaya özel SharedPreferences içindedir;
+ * uygulama silinince gider — sunucudaki kayıt cihaz kimliğine bağlı olduğu
+ * için yeniden kurulumda süreler buluttan geri yüklenir.
+ */
+internal object AeroKeyPrefs {
+
+    private const val FILE = "aerokey_state"
+
+    private const val K_LICENSE = "license_key"
+    private const val K_IS_VIP = "is_vip"
+    private const val K_EXPIRES_TEXT = "expires_text"
+    private const val K_LAST_OK_AT = "last_verified_at"
+    private const val K_USERNAME = "username"
+    private const val K_TOTAL_SECONDS = "total_seconds"
+    private const val K_GAME_SECONDS = "game_seconds"
+    private const val K_ACHIEVEMENTS = "achievements_raw"
+    private const val K_FALLBACK_ID = "fallback_device_id"
+
+    const val DEFAULT_USERNAME = "GizemliOyuncu"
+
+    private fun prefs(context: Context): SharedPreferences =
+        context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+
+    // --- Cihaz kimliği ---------------------------------------------------
+
+    /**
+     * Sunucunun VIP eşleştirmesinde ve istatistik kaydında kullandığı kimlik.
+     *
+     * ANDROID_ID, cihaz + uygulama imzası başına sabittir ve kurulum silinip
+     * yeniden kurulsa bile (aynı imzayla) korunur; bu yüzden VIP tanımlamak
+     * için doğru seçimdir. Emülatör gibi bazı ortamlarda boş/null gelebildiği
+     * için, o durumda bir kez üretilip saklanan yedek bir kimliğe düşeriz.
+     */
+    @SuppressLint("HardwareIds")
+    fun deviceId(context: Context): String {
+        val androidId = try {
+            Settings.Secure.getString(
+                context.applicationContext.contentResolver,
+                Settings.Secure.ANDROID_ID
+            )
+        } catch (_: Exception) {
+            null
+        }
+        if (!androidId.isNullOrBlank() && androidId != "9774d56d682e549c") {
+            return androidId
+        }
+
+        val p = prefs(context)
+        val stored = p.getString(K_FALLBACK_ID, null)
+        if (!stored.isNullOrBlank()) return stored
+
+        val generated = UUID.randomUUID().toString().replace("-", "").take(16)
+        p.edit().putString(K_FALLBACK_ID, generated).apply()
+        return generated
+    }
+
+    // --- Lisans ----------------------------------------------------------
+
+    fun licenseKey(context: Context): String =
+        prefs(context).getString(K_LICENSE, "") ?: ""
+
+    fun isVip(context: Context): Boolean =
+        prefs(context).getBoolean(K_IS_VIP, false)
+
+    fun expiresText(context: Context): String =
+        prefs(context).getString(K_EXPIRES_TEXT, "") ?: ""
+
+    fun lastVerifiedAt(context: Context): Long =
+        prefs(context).getLong(K_LAST_OK_AT, 0L)
+
+    fun saveLicense(context: Context, key: String, vip: Boolean, expiresText: String) {
+        prefs(context).edit()
+            .putString(K_LICENSE, key)
+            .putBoolean(K_IS_VIP, vip)
+            .putString(K_EXPIRES_TEXT, expiresText)
+            .putLong(K_LAST_OK_AT, System.currentTimeMillis())
+            .apply()
+    }
+
+    fun clearLicense(context: Context) {
+        prefs(context).edit()
+            .remove(K_LICENSE)
+            .remove(K_IS_VIP)
+            .remove(K_EXPIRES_TEXT)
+            .remove(K_LAST_OK_AT)
+            .apply()
+    }
+
+    /** Daha önce doğrulanmış bir lisans var mı (çevrimdışı açılış için)? */
+    fun hasStoredLicense(context: Context): Boolean =
+        isVip(context) || licenseKey(context).isNotBlank()
+
+    // --- Kullanıcı adı ---------------------------------------------------
+
+    fun username(context: Context): String =
+        prefs(context).getString(K_USERNAME, DEFAULT_USERNAME) ?: DEFAULT_USERNAME
+
+    fun setUsername(context: Context, name: String) {
+        val clean = name.trim().take(50).ifBlank { DEFAULT_USERNAME }
+        prefs(context).edit().putString(K_USERNAME, clean).apply()
+    }
+
+    // --- Oynama süreleri -------------------------------------------------
+
+    fun totalSeconds(context: Context): Long =
+        prefs(context).getLong(K_TOTAL_SECONDS, 0L)
+
+    fun gameSeconds(context: Context): Long =
+        prefs(context).getLong(K_GAME_SECONDS, 0L)
+
+    fun saveSeconds(context: Context, total: Long, game: Long) {
+        prefs(context).edit()
+            .putLong(K_TOTAL_SECONDS, total)
+            .putLong(K_GAME_SECONDS, game)
+            .apply()
+    }
+
+    // --- Başarımlar ------------------------------------------------------
+
+    /**
+     * Sunucudaki `basarimlar` alanının ham JSON metni.
+     *
+     * Bu port başarım üretmez; ama /sync uç noktası bu alanı her çağrıda
+     * yeniden yazdığı için, kullanıcının AeroKey hesabında başka bir
+     * uygulamadan gelen başarımlar varsa onları SİLMEMEK adına mevcut
+     * değeri bir kez okuyup her senkronda aynen geri gönderiyoruz.
+     */
+    fun achievementsRaw(context: Context): String =
+        prefs(context).getString(K_ACHIEVEMENTS, "[]") ?: "[]"
+
+    fun setAchievementsRaw(context: Context, raw: String) {
+        prefs(context).edit().putString(K_ACHIEVEMENTS, raw).apply()
+    }
+}

@@ -1,0 +1,3 @@
+Bu dosya, Dockerfile'daki 'COPY icon.*' deseninin hicbir dosyayla eslesmemesini
+(ve bu yuzden Docker build'in basarisiz olmasini) onlemek icin vardir.
+Kendi ikonunuzu eklemek icin bu klasore icon.png veya icon.jpg koyun.
