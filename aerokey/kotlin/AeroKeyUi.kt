@@ -444,13 +444,24 @@ internal fun avatarAssets(): List<String> =
         .filter { it.isNotEmpty() }
 
 /**
- * Kartın çevresinde yavaşça dönen gradyan bir kenarlık çizer.
+ * Çevresinde yavaşça dönen gradyan bir kenarlık çizen KAPSAYICI.
  *
- * Giriş ekranını sade bir kutudan çıkarıp canlı hale getiren asıl öğe bu:
- * SweepGradient'i sürekli döndürerek kenarlıkta dolaşan bir ışık etkisi
- * elde ediyoruz.
+ * Kenarlığı ayrı bir `View` olarak üstüne bindirmiyoruz; kapsayıcının
+ * kendisi çiziyor. Bunun sebebi somut bir hata:
+ *
+ * `wrap_content` yükseklikli bir FrameLayout içine `match_parent` bir
+ * bindirme koyunca, ScrollView'in `fillViewport`'u (içerik ekrandan
+ * kısaysa) düzeni `EXACTLY(ekran)` ile yeniden ölçer. O zincirde
+ * `EXACTLY(H) -> AT_MOST(H) -> AT_MOST(H)` olur ve sade bir View
+ * `AT_MOST` için spec boyunu döndürdüğü için bindirme H piksele şişer;
+ * kapsayıcı da onun boyuna sarılıp TÜM EKRANI kaplar. Sonuç: kartın
+ * altında uzun boş bir bant, afişte ise ekranın tamamını yiyen boş bir
+ * kutu.
+ *
+ * Kenarlığı `dispatchDraw` içinde, çocukların ÜSTÜNE çizerek bu sınıfı
+ * ölçüm denkleminden tamamen çıkarıyoruz.
  */
-internal class GlowBorderView(context: Context) : View(context) {
+internal class GlowBorderFrame(context: Context) : android.widget.FrameLayout(context) {
 
     private val strokeWidthPx = context.dp(1.6).toFloat()
     private val cornerPx = context.dp(24).toFloat()
@@ -461,6 +472,9 @@ internal class GlowBorderView(context: Context) : View(context) {
     private val matrix = android.graphics.Matrix()
     private var sweep: SweepGradient? = null
     private var angle = 0f
+
+    /** Köşe yarıçapı; afiş ve kart farklı yuvarlaklıkta olabiliyor. */
+    var cornerRadiusPx: Float = cornerPx
 
     private val animator = ValueAnimator.ofFloat(0f, 360f).apply {
         duration = 6000L
@@ -496,7 +510,9 @@ internal class GlowBorderView(context: Context) : View(context) {
         }
     }
 
-    override fun onDraw(canvas: Canvas) {
+    override fun dispatchDraw(canvas: Canvas) {
+        super.dispatchDraw(canvas)
+
         val shader = sweep ?: return
         matrix.setRotate(angle, width / 2f, height / 2f)
         shader.setLocalMatrix(matrix)
@@ -504,7 +520,8 @@ internal class GlowBorderView(context: Context) : View(context) {
 
         val inset = strokeWidthPx / 2f
         canvas.drawRoundRect(
-            inset, inset, width - inset, height - inset, cornerPx, cornerPx, paint
+            inset, inset, width - inset, height - inset,
+            cornerRadiusPx, cornerRadiusPx, paint
         )
     }
 }

@@ -235,10 +235,13 @@ class AeroKeyGateActivity : Activity() {
             setPadding(dp(18), dp(26), dp(18), dp(16))
         }
 
-        // DİKEYDE ORTALA. fillViewport, içerik ekrandan kısaysa bu düzeni
-        // ekran boyuna kadar geriyordu ve artan yer tamamen ALTTA birikip
-        // kartın altında uzun boş bir bant bırakıyordu. Ortalayınca artan
-        // yer yukarı/aşağı eşit dağılıyor, o bant kalmıyor.
+        // Dikeyde ortala: içerik ekrandan kısaysa artan yer alta yığılmak
+        // yerine yukarı/aşağı eşit dağılır.
+        //
+        // NOT: Kartın altındaki uzun boş bandın asıl sebebi bu DEĞİLDİ —
+        // kartın kendisi tüm ekrana kadar şişiyordu, çünkü içinde
+        // match_parent bir kenarlık bindirmesi vardı. Gerçek düzeltme
+        // GlowBorderFrame'de; buradaki ortalama yalnızca görsel denge.
         val holder = column().apply {
             gravity = Gravity.CENTER_HORIZONTAL or Gravity.CENTER_VERTICAL
         }
@@ -259,14 +262,13 @@ class AeroKeyGateActivity : Activity() {
         }
         buildCardContent(card)
 
-        cardFrame = FrameLayout(this).apply {
+        // Kenarlık, kapsayıcının KENDİSİ tarafından çiziliyor. Eskiden
+        // match_parent bir bindirme View'ı vardı ve o, wrap_content olan
+        // kartı ekran boyuna kadar şişiriyordu (kartın altındaki uzun boş
+        // bandın sebebi buydu). Ayrıntı: GlowBorderFrame açıklaması.
+        cardFrame = GlowBorderFrame(this).apply {
             background = glassCard(this@AeroKeyGateActivity)
-            addView(
-                GlowBorderView(this@AeroKeyGateActivity),
-                FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
-                )
-            )
+            cornerRadiusPx = dp(24).toFloat()
             addView(
                 card,
                 FrameLayout.LayoutParams(
@@ -342,13 +344,16 @@ class AeroKeyGateActivity : Activity() {
             scaleType = ImageView.ScaleType.CENTER_CROP
         }
 
-        // Köşeleri yuvarlatmak için çerçeveye alıyoruz. Dolgu YOK: en ufak
-        // bir iç boşluk bile "kutuyu tamamen doldur" isteğini bozardı.
-        val frame = FrameLayout(this).apply {
+        // Tek kapsayıcı: köşeleri yuvarlar, kenarlığı kendi çizer.
+        // Dolgu YOK — en ufak bir iç boşluk "kutuyu tamamen doldur"
+        // isteğini bozardı. Yüksekliği yalnızca görsel belirliyor;
+        // içinde ölçümü şişirebilecek match_parent bir kardeş yok.
+        val frame = GlowBorderFrame(this).apply {
             background = GradientDrawable().apply {
                 cornerRadius = dp(18).toFloat()
                 setColor(Color.parseColor("#3D0D1226"))
             }
+            cornerRadiusPx = dp(18).toFloat()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                 clipToOutline = true
                 elevation = dp(8).toFloat()
@@ -362,25 +367,7 @@ class AeroKeyGateActivity : Activity() {
             )
         }
 
-        // Afişin çevresinde dönen ışık çizgisi — kartla aynı görsel dil.
-        val glow = FrameLayout(this).apply {
-            addView(
-                frame,
-                FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                )
-            )
-            addView(
-                GlowBorderView(this@AeroKeyGateActivity),
-                FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
-            )
-        }
-
-        return glow.apply {
+        return frame.apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
             )
