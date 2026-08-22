@@ -455,8 +455,26 @@ def _resolve_identity(
     )
 
 
+def _required_permissions(need_internet: bool, need_notifications: bool) -> list[str]:
+    """
+    AeroKey'in çalışması için android.json'da bulunması gereken izinler.
+
+    POST_NOTIFICATIONS yalnızca Android 13+ tarafından zorunlu tutulur; daha
+    eski sürümler onu görmezden gelir, o yüzden koşulsuz eklemek güvenlidir.
+    """
+    permissions: list[str] = []
+    if need_internet:
+        permissions.append("INTERNET")
+    if need_notifications:
+        permissions.append("POST_NOTIFICATIONS")
+    return permissions
+
+
 def _ensure_android_json(
-    project_root: Path, identity: ProjectIdentity, need_internet: bool
+    project_root: Path,
+    identity: ProjectIdentity,
+    need_internet: bool,
+    need_notifications: bool = False,
 ) -> Optional[str]:
     """
     Ren'Py'nin Android derlemesi, proje kökünde bir android.json bulamazsa
@@ -470,28 +488,30 @@ def _ensure_android_json(
             existing_path = project_root / candidate
             break
 
+    required = _required_permissions(need_internet, need_notifications)
+
     if existing_path is not None:
-        if not need_internet:
+        if not required:
             return None
-        # AeroKey açıksa INTERNET izni şart; kullanıcının kendi dosyasında
-        # yoksa yalnızca o izni ekleriz, başka hiçbir alanına dokunmayız.
+        # Kullanıcının kendi dosyasında eksik olan izinleri ekleriz, başka
+        # hiçbir alanına dokunmayız.
         try:
             data = json.loads(existing_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
         permissions = data.get("permissions") or []
-        if "INTERNET" in permissions:
+        missing = [p for p in required if p not in permissions]
+        if not missing:
             return None
-        permissions.append("INTERNET")
+        permissions.extend(missing)
         data["permissions"] = permissions
         try:
             existing_path.write_text(json.dumps(data, indent=4), encoding="utf-8")
         except OSError:
             return None
         return (
-            f"Otomatik düzeltme: AeroKey lisans ekranı açık olduğu için "
-            f"{existing_path.name} dosyasına INTERNET izni eklendi "
-            "(geçici kopyada)."
+            f"Otomatik düzeltme: AeroKey için gereken {', '.join(missing)} izni "
+            f"{existing_path.name} dosyasına eklendi (geçici kopyada)."
         )
 
     data = dict(_ANDROID_JSON_DEFAULTS)
@@ -504,8 +524,9 @@ def _ensure_android_json(
             "numeric_version": _derive_version_code(identity.version),
         }
     )
-    if need_internet and "INTERNET" not in data["permissions"]:
-        data["permissions"].append("INTERNET")
+    for permission in required:
+        if permission not in data["permissions"]:
+            data["permissions"].append(permission)
 
     try:
         (project_root / "android.json").write_text(
@@ -1087,6 +1108,7 @@ class BuildRequest:
     aerokey_survey: bool
     aerokey_profile: bool
     aerokey_bug_report: bool
+    aerokey_notifications: bool
 
 
 def run_build(job: BuildJob, req: BuildRequest) -> None:
@@ -1188,7 +1210,12 @@ def _execute_build(
     if dirname_fix:
         job.log(dirname_fix)
 
-    android_json_msg = _ensure_android_json(project_root, identity, req.aerokey_enabled)
+    android_json_msg = _ensure_android_json(
+        project_root,
+        identity,
+        need_internet=req.aerokey_enabled,
+        need_notifications=req.aerokey_enabled and req.aerokey_notifications,
+    )
     if android_json_msg:
         job.log(android_json_msg)
 
@@ -1245,6 +1272,7 @@ def _execute_build(
                     "FEATURE_SURVEY": req.aerokey_survey,
                     "FEATURE_PROFILE": req.aerokey_profile,
                     "FEATURE_BUG_REPORT": req.aerokey_bug_report,
+                    "NOTIFICATIONS_ENABLED": req.aerokey_notifications,
                 },
                 banner_source=banner_source,
             )
@@ -1544,6 +1572,7 @@ async def api_build(
     aerokey_survey: str = Form("false"),
     aerokey_profile: str = Form("false"),
     aerokey_bug_report: str = Form("false"),
+    aerokey_notifications: str = Form("false"),
 ) -> JSONResponse:
     version = (renpy_version or "").strip() or DEFAULT_RENPY_VERSION
     if not VERSION_RE.match(version):
@@ -1589,6 +1618,7 @@ async def api_build(
         aerokey_survey=_bool_form(aerokey_survey),
         aerokey_profile=_bool_form(aerokey_profile),
         aerokey_bug_report=_bool_form(aerokey_bug_report),
+        aerokey_notifications=_bool_form(aerokey_notifications),
     )
 
     job = _register_job()

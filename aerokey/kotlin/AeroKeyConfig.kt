@@ -36,6 +36,10 @@ internal object AeroKeyConfig {
     /** Afişin APK assets klasöründeki adı (HAS_BANNER true ise anlamlı). */
     const val BANNER_ASSET: String = "aerokey_banner.gif"
 
+    // --- Bildirimler ------------------------------------------------------
+    /** Eklentiden gelen duyurular bildirim olarak gösterilsin mi? */
+    const val NOTIFICATIONS_ENABLED: Boolean = false
+
     // --- İsteğe bağlı paneller ------------------------------------------
     const val FEATURE_LEADERBOARD: Boolean = false
     const val FEATURE_SURVEY: Boolean = false

@@ -230,8 +230,22 @@ internal object AeroKeySession {
     }
 
     /**
-     * Lisansı sessizce yeniden doğrular. Süresi dolmuşsa oyunu kapatıp
-     * giriş ekranını "süre doldu" mesajıyla öne getirir.
+     * Bugün "ücretsiz gün" mü? Giriş ekranı bunu belirler, oturum boyunca
+     * düzenli denetimlerde tazelenir.
+     */
+    @Volatile private var freeAccess = false
+
+    fun setFreeAccess(active: Boolean) {
+        freeAccess = active
+    }
+
+    /**
+     * Düzenli denetim: önce sunucu durumunu (ücretsiz gün + yeni duyurular)
+     * sorar, sonra gerekiyorsa lisansı doğrular.
+     *
+     * İkisini tek akışta yürütmek önemli: ÜCRETSİZ GÜNDE lisans denetimi
+     * HİÇ yapılmamalı, yoksa anahtarsız giren oyuncu on dakika sonra
+     * oyundan atılırdı.
      *
      * Ağ hatası burada KASITLI olarak yok sayılır: geçici bir bağlantı
      * kopukluğu yüzünden oyuncuyu oyundan atmak istemeyiz, yalnızca
@@ -239,22 +253,33 @@ internal object AeroKeySession {
      */
     private fun recheckLicense() {
         val context = appContext ?: return
-        if (!AeroKeyPrefs.hasStoredLicense(context)) return
         if (!recheckInFlight.compareAndSet(false, true)) return
 
         val vip = AeroKeyPrefs.isVip(context)
         val key = AeroKeyPrefs.licenseKey(context)
         val deviceId = AeroKeyPrefs.deviceId(context)
+        val hasLicense = AeroKeyPrefs.hasStoredLicense(context)
 
         AeroKeyAsync.run({
-            if (vip) AeroKeyApi.checkVip(deviceId) else AeroKeyApi.checkKey(key)
-        }) { state ->
+            // Bu blok arka planda çalışır; iki ağ çağrısını da burada
+            // sırayla yapıp sonucu birlikte döndürüyoruz.
+            val free = AeroKeyNotifications.checkNow(context)
+            val license = when {
+                free.active -> null          // ücretsiz gün: doğrulama yok
+                !hasLicense -> null          // doğrulanacak bir şey yok
+                vip -> AeroKeyApi.checkVip(deviceId)
+                else -> AeroKeyApi.checkKey(key)
+            }
+            Pair(free, license)
+        }) { (free, state) ->
             recheckInFlight.set(false)
+            freeAccess = free.active
+
+            if (state == null) return@run
             if (state.valid) {
                 AeroKeyPrefs.saveLicense(context, key, vip, state.expiresText)
                 return@run
             }
-            // Sunucuya ulaşılamadıysa oyunu bölmüyoruz.
             if (state.message.contains("ulaşılamadı")) {
                 Log.i(TAG, "Lisans denetimi ertelendi: bağlantı yok.")
                 return@run

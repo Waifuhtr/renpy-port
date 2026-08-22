@@ -159,6 +159,23 @@ internal object AeroKeyPrefs {
         prefs(context).edit().putString(K_ACHIEVEMENTS, raw).apply()
     }
 
+    // --- Duyurular --------------------------------------------------------
+
+    private const val K_LAST_NOTICE = "last_notice_id"
+
+    /**
+     * Gösterilmiş en yüksek duyuru kimliği.
+     *
+     * Sunucudan yalnızca bundan YENİ duyuruları istiyoruz; böylece aynı
+     * duyuru her denetimde yeniden bildirim olarak düşmüyor.
+     */
+    fun lastNoticeId(context: Context): Long =
+        prefs(context).getLong(K_LAST_NOTICE, 0L)
+
+    fun setLastNoticeId(context: Context, id: Long) {
+        prefs(context).edit().putLong(K_LAST_NOTICE, id).apply()
+    }
+
     // --- Oyun içi yüzen menü ---------------------------------------------
 
     private const val K_OVERLAY_X = "overlay_x"

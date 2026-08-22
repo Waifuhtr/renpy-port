@@ -48,6 +48,7 @@ MARKER = "AEROKEY-PATCH"
 
 KOTLIN_PACKAGE_PATH = "com/riaslink/aerokey"
 GATE_ACTIVITY = "com.riaslink.aerokey.AeroKeyGateActivity"
+JOB_SERVICE = "com.riaslink.aerokey.AeroKeyNotificationJobService"
 
 DEFAULT_KOTLIN_VERSION = "2.2.20"
 
@@ -721,13 +722,55 @@ def find_manifest_template(sdk: Path) -> Path:
     return matches[0]
 
 
+JOB_SERVICE_XML = f"""
+        <!-- {MARKER}: Oyun kapalıyken de duyuru alabilmek için düzenli
+             çalışan arka plan işi. Dışa kapalı; yalnızca sistemin
+             JobScheduler'ı bağlayabilir. -->
+        <service
+            android:name="{JOB_SERVICE}"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+"""
+
+
+def _top_up_manifest(template: Path, text: str) -> bool:
+    """
+    Daha önce yamalanmış bir manifeste, sonradan eklenen parçaları tamamlar.
+
+    Şu an tek eksik olabilecek parça bildirim servisi; ileride başka bir şey
+    eklenirse aynı kalıpla buraya girer.
+    """
+    if JOB_SERVICE in text:
+        print(f"[aerokey] Manifest şablonu zaten güncel: {template}")
+        return False
+
+    closing = re.search(r"([ \t]*)</application>", text)
+    if not closing:
+        raise PatchError(f"{template} içinde </application> etiketi bulunamadı.")
+
+    text = (
+        text[: closing.start()]
+        + JOB_SERVICE_XML.rstrip("\n")
+        + "\n\n"
+        + closing.group(1)
+        + "</application>"
+        + text[closing.end():]
+    )
+    write(template, text)
+    print(f"[aerokey] Manifest şablonuna bildirim servisi eklendi: {template}")
+    return True
+
+
 def patch_manifest_template(sdk: Path) -> bool:
     template = find_manifest_template(sdk)
     text = read(template)
 
     if MARKER in text:
-        print(f"[aerokey] Manifest şablonu zaten yamalı: {template}")
-        return False
+        # Yama imzalı olduğu için "zaten yamalı" deyip geçmek, betiğin ESKİ
+        # bir sürümüyle yamalanmış bir şablona sonradan eklenen parçaların
+        # (örn. bildirim servisi) hiç girmemesi demek olurdu. O yüzden
+        # eksik parçaları burada tamamlıyoruz.
+        return _top_up_manifest(template, text)
 
     launcher_count = text.count("android.intent.category.LAUNCHER")
     if launcher_count == 0:
@@ -759,7 +802,7 @@ def patch_manifest_template(sdk: Path) -> bool:
         raise PatchError(f"{template} içinde </application> etiketi bulunamadı.")
     text = (
         text[: closing.start()]
-        + GATE_ACTIVITY_XML.rstrip("\n")
+        + (GATE_ACTIVITY_XML + JOB_SERVICE_XML).rstrip("\n")
         + "\n\n"
         + closing.group(1)
         + "</application>"
@@ -781,6 +824,8 @@ def patch_manifest_template(sdk: Path) -> bool:
             )
     if GATE_ACTIVITY not in text:
         raise PatchError("Geçit activity'si manifeste eklenemedi.")
+    if JOB_SERVICE not in text:
+        raise PatchError("Bildirim arka plan servisi manifeste eklenemedi.")
 
     write(template, text)
     print(f"[aerokey] Manifest şablonu yamalandı: {template}")
@@ -817,6 +862,7 @@ def render_config(values: dict) -> str:
         "GAME_TITLE": "Ren'Py Game",
         "HAS_BANNER": False,
         "BANNER_ASSET": "aerokey_banner.gif",
+        "NOTIFICATIONS_ENABLED": False,
         "FEATURE_LEADERBOARD": False,
         "FEATURE_SURVEY": False,
         "FEATURE_PROFILE": False,
@@ -835,6 +881,7 @@ def render_config(values: dict) -> str:
         "GAME_TITLE": "String",
         "HAS_BANNER": "Boolean",
         "BANNER_ASSET": "String",
+        "NOTIFICATIONS_ENABLED": "Boolean",
         "FEATURE_LEADERBOARD": "Boolean",
         "FEATURE_SURVEY": "Boolean",
         "FEATURE_PROFILE": "Boolean",

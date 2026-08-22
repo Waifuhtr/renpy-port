@@ -74,7 +74,36 @@ class AeroKeyGateActivity : Activity() {
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
         buildUi()
+        AeroKeySession.primeAchievements(this)
+        AeroKeyNotifications.scheduleBackgroundChecks(this)
+        requestNotificationPermissionIfNeeded()
 
+        checkFreeAccessThenContinue()
+    }
+
+    /**
+     * Önce sunucuya sorar: bugün "ücretsiz gün" ilan edilmiş mi?
+     *
+     * İlan edilmişse lisans HİÇ sorulmaz — ekranın ortasında duyuru
+     * gösterilip oyuna geçilir. Sunucuya ulaşılamazsa (ya da eklenti bu uç
+     * noktayı tanımayan eski bir sürümse) sessizce normal akışa döneriz;
+     * ağ sorunu yüzünden kimseyi kapıda bırakmayız.
+     */
+    private fun checkFreeAccessThenContinue() {
+        setBusy(true)
+        AeroKeyAsync.run({ AeroKeyNotifications.checkNow(this) }) { free ->
+            if (isFinishing) return@run
+            setBusy(false)
+            AeroKeySession.setFreeAccess(free.active)
+            if (free.active) {
+                showFreeAccessScreen(free.message)
+            } else {
+                continueNormalFlow()
+            }
+        }
+    }
+
+    private fun continueNormalFlow() {
         val expiredMessage = intent?.getStringExtra(EXTRA_EXPIRED_MESSAGE)
         if (!expiredMessage.isNullOrBlank()) {
             showStatus(expiredMessage, Palette.danger)
@@ -83,8 +112,106 @@ class AeroKeyGateActivity : Activity() {
             // hiç uğraştırmadan sessizce tazeleyip oyuna geçmeyi deneriz.
             tryAutoLogin()
         }
+    }
 
-        AeroKeySession.primeAchievements(this)
+    /**
+     * Android 13+ bildirim izni.
+     *
+     * Reddedilirse hiçbir şey bozulmaz: duyurular yalnızca bildirim olarak
+     * gösterilemez, oyun ve lisans akışı aynen çalışır. Bu yüzden sonucu
+     * beklemiyor, akışı da bloklamıyoruz.
+     */
+    private fun requestNotificationPermissionIfNeeded() {
+        if (!AeroKeyConfig.NOTIFICATIONS_ENABLED) return
+        if (Build.VERSION.SDK_INT < 33) return
+        try {
+            val permission = "android.permission.POST_NOTIFICATIONS"
+            if (checkSelfPermission(permission) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(permission), 4128)
+            }
+        } catch (_: Exception) {
+            // İzin isteği desteklenmiyorsa sessizce geçiyoruz.
+        }
+    }
+
+    /**
+     * "Bugün anahtarlar ücretsiz" duyurusu — EKRANIN TAM ORTASINDA, tüm
+     * geçidin üzerinde.
+     */
+    private fun showFreeAccessScreen(message: String) {
+        val overlay = FrameLayout(this).apply {
+            setBackgroundColor(Color.parseColor("#E6070A14"))
+            isClickable = true
+        }
+
+        val box = column().apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(28), dp(30), dp(28), dp(30))
+        }
+
+        box.addView(TextView(this).apply {
+            text = "🎁"
+            textSize = 46f
+            gravity = Gravity.CENTER
+        })
+        box.addSpace(dp(10))
+
+        val title = TextView(this).apply {
+            text = message
+            textSize = 28f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setTextColor(Palette.textPrimary)
+            post {
+                if (width > 0) {
+                    paint.shader = LinearGradient(
+                        0f, 0f, width.toFloat(), 0f,
+                        intArrayOf(Palette.gold, Palette.accentWarm, Palette.accent),
+                        null, Shader.TileMode.CLAMP
+                    )
+                    invalidate()
+                }
+            }
+        }
+        box.addView(title)
+        box.addSpace(dp(10))
+        box.addView(bodyText("Anahtar gerekmiyor — oyun başlatılıyor…").apply {
+            gravity = Gravity.CENTER
+        })
+
+        overlay.addView(
+            box,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER
+            )
+        )
+        root.addView(
+            overlay,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        overlay.alpha = 0f
+        overlay.animate().alpha(1f).setDuration(260).start()
+        title.scaleX = 0.82f
+        title.scaleY = 0.82f
+        title.animate().scaleX(1f).scaleY(1f).setDuration(460)
+            .setInterpolator(android.view.animation.OvershootInterpolator(1.3f))
+            .start()
+
+        // Ücretsiz gün yalnızca ANAHTAR adımını atlatır; oyuncu sıralama
+        // adını hiç seçmediyse onu yine soruyoruz, aksi halde liderlik
+        // tablosu anlamsızlaşırdı.
+        root.postDelayed({
+            if (isFinishing) return@postDelayed
+            overlay.animate().alpha(0f).setDuration(240).withEndAction {
+                root.removeView(overlay)
+                if (AeroKeyPrefs.usernameChosen(this)) showFarewell() else showUsernameStep()
+            }.start()
+        }, 2200)
     }
 
     // --- Arayüz kurulumu -------------------------------------------------

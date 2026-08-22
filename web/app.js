@@ -347,6 +347,7 @@
     const boolFields = [
       "want_apk", "want_aab", "aerokey_enabled", "aerokey_leaderboard",
       "aerokey_survey", "aerokey_profile", "aerokey_bug_report",
+      "aerokey_notifications",
     ];
     boolFields.forEach((id) => data.append(id, $(id).checked ? "true" : "false"));
 

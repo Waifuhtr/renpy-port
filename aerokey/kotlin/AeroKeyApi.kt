@@ -81,6 +81,25 @@ internal object AeroKeyApi {
         return post("/sync", body)
     }
 
+    /**
+     * GET /durum — sunucunun anlık durumu: bugün "ücretsiz gün" mü, ve
+     * oyuncunun henüz görmediği duyurular neler.
+     *
+     * Tek bir uç noktada topladık: hem ücretsiz gün hem bildirimler düzenli
+     * aralıkla sorgulanıyor, ikisini ayrı çağrılara bölmek gereksiz trafik
+     * olurdu.
+     *
+     * Eklentinin ESKİ sürümlerinde bu uç nokta yoktur; o durumda sunucu 404
+     * döner ve çağıran taraf bunu "ücretsiz gün yok, duyuru yok" olarak
+     * yorumlar — yani eski eklentiyle de çalışmaya devam eder.
+     */
+    fun status(gameId: String, lastNoticeId: Long, deviceId: String): Result =
+        get(
+            "/durum?oyun_id=" + enc(gameId) +
+                "&son_duyuru=" + lastNoticeId +
+                "&cihaz_id=" + enc(deviceId)
+        )
+
     /** GET /liderlik — en çok oynayan ilk 10 kişi. */
     fun leaderboard(): Result = get("/liderlik")
 

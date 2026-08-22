@@ -33,6 +33,8 @@ açık kaynak **renkit** aracını (`renutil` + `renconstruct`) otomatikleştiri
 | **Oyun süresi sayımı** | Oynanan süre sunucuya senkronlanır (Steam tarzı) |
 | Otomatik ikon | Tek kare görselden iki katmanlı adaptif ikon üretir |
 | Gradle ön belleklemesi | 504 / indirme hatalarını baştan engeller |
+| **Ücretsiz erişim günleri** | Eklentiden tarih verin, o gün anahtar sorulmaz |
+| **Duyuru bildirimleri** | Eklentiden gönderin, oyuncunun bildirim çekmecesine düşsün |
 | Canlı günlük | Server-Sent Events ile anlık akan derleme çıktısı |
 
 ---
@@ -50,12 +52,13 @@ açık kaynak **renkit** aracını (`renutil` + `renconstruct`) otomatikleştiri
    requirements.txt
    README.md
    icon.placeholder          (silmeyin — Dockerfile'daki COPY icon.* buna dayanıyor)
+   banner.placeholder        (silmeyin — COPY banner.* buna dayanıyor)
    web/index.html
    web/style.css
    web/app.js
    aerokey/__init__.py
    aerokey/patch_rapt.py
-   aerokey/kotlin/*.kt        (7 dosya)
+   aerokey/kotlin/*.kt        (9 dosya)
    ```
 
 4. **Settings → Variables and secrets** kısmından isterseniz şunları
@@ -180,43 +183,74 @@ bekletilmez — ad yerelde durur ve ilk başarılı senkronda sunucuya gider.
 
 Ardından kısa bir **"İyi oyunlar!"** ekranı gösterilip oyun başlatılır.
 
-### 🎮 Oyun içi yüzen menü
+### 🎮 Oyun içi menü
 
-Doğrulamadan sonra oyunun üzerinde küçük, parlayan bir **baloncuk** belirir.
-Oyun yatay çalıştığı için menü de yatay düzende tasarlandı.
+Doğrulamadan sonra oyunun **sağ üst köşesinde sabit** bir menü düğmesi belirir.
+Oyun yatay çalıştığı için panel de yatay düzende tasarlandı.
 
-- **Sürüklenebilir** — baloncuğu istediğiniz yere taşıyın; bıraktığınızda en
-  yakın yan kenara yaslanır. Konum, ekranın **oranı** olarak saklanır, yani
-  ekran döndüğünde ya da başka bir cihazda menü ekran dışında kalmaz.
-- **Dokununca açılır** — geniş ve alçak bir panel, baloncuğun yer olan
-  tarafına doğru açılır:
-  - **Başlıkta hangi oyunda olduğunuz** yazar (uygulama adı),
+- **Dokununca açılır** — düğmenin altından geniş ve alçak bir panel iner:
+  - başlıkta **hangi oyunda olduğunuz** ve oyuncu adınız,
   - yanında **canlı oynama süresi** (panel açıkken saniye saniye tazelenir),
-  - tek sıra hâlinde etkin olan eylemler: 🏆 Liderlik, 👤 Profilim,
-    📊 Anket, 🐞 Hata Bildir.
-- **🙈 Menüyü gizle** — baloncuğu küçültüp neredeyse saydam yapar, yani oyunu
-  örtmez. Yok olmaz: tek dokunuşla geri gelir, böylece menüyü geri getirmenin
-  yolunu kaybetmezsiniz. Gizli/açık durumu da kalıcı olarak saklanır.
-- Menünün **dışına** yapılan dokunuşlar tüketilmez, doğrudan oyuna geçer —
-  yani menü oyun kontrollerini engellemez (panel açıkken hariç; o sırada
-  arka planı karartan perde dokunuşları yakalar ve panel kapanır).
+  - tek sıra hâlinde: 🏆 Liderlik, 👤 Profilim, 📊 Anket, 🐞 Hata Bildir.
+- **🙈 Menüyü gizle** — düğmeyi küçültüp neredeyse saydam yapar, yani oyunu
+  örtmez. Yok olmaz: tek dokunuşla geri gelir. Durum kalıcı olarak saklanır.
+- Menünün **dışına** yapılan dokunuşlar tüketilmez, doğrudan oyuna geçer.
 
-Teknik not: menü, `WindowManager` üzerinden **kendi penceresinde** yaşıyor
-(`TYPE_APPLICATION_PANEL` — Activity'mizin penceresine bağlı bir *alt*
-pencere). Bunun iki nedeni var:
+**Neden sürüklenebilir değil?** Denendi ve iki kez başarısız oldu; sonucu
+buraya not ediyoruz ki tekrar denenmesin:
 
-1. **Hiçbir izin gerekmiyor.** "Diğer uygulamaların üzerinde göster"
-   (`SYSTEM_ALERT_WINDOW`) izni yalnızca `TYPE_APPLICATION_OVERLAY` için
-   gerekir; onu kullanmıyoruz.
-2. **Ren'Py oyunu bir `SurfaceView` ile çiziliyor** ve SurfaceView, pencere
-   yüzeyinde saydam bir "delik" açıyor. Menü ilk sürümde Activity'nin görünüm
-   ağacına ekleniyordu ve baloncuk sürüklenince kayboluyordu: o deliğin
+1. Düğme Activity'nin görünüm ağacına eklenip sürüklenebilir yapıldığında,
+   sürüklenince **kayboluyor** (dokunma çalışmaya devam ediyor, yeniden
+   dokununca geri geliyordu). Sebep: Ren'Py oyunu bir `SurfaceView` ile
+   çiziliyor ve bu, pencere yüzeyinde saydam bir "delik" açıyor; o deliğin
    üstündeki görünümler yalnızca yeniden çizilen bölgelerde güvenilir şekilde
-   birleştiriliyor. Ayrı bir pencereyi taşımak ise bir birleştirici
-   (compositor) işlemi olduğundan bu sorunu tamamen ortadan kaldırıyor.
+   birleştiriliyor.
+2. Menü `WindowManager` ile ayrı bir pencereye (`TYPE_APPLICATION_PANEL`)
+   taşındığında ise **hiç görünmedi**.
 
-Pencereler tam olarak içerikleri kadar büyük ve `FLAG_NOT_TOUCH_MODAL`
-taşıyor, yani **dışlarındaki dokunuşlar doğrudan oyuna gidiyor**.
+Elimizdeki kanıt net: görünüm ağacı çiziyor, ayrı pencere çizmiyor. Bu yüzden
+görünüm ağacında kalıp sorunun kaynağını — hareketi — ortadan kaldırdık.
+Sabit bir görünüm yeniden konumlanmadığı için bayat bölge sorunu oluşmuyor.
+
+### 🎁 Ücretsiz erişim günleri (eklentiden yönetilir)
+
+Eklenti panelindeki **"Ücretsiz Erişim Günleri"** bölümünden bir tarih
+eklerseniz, o gün oyunlar **anahtar sormaz**: açılışta ekranın tam ortasında
+"Bugün anahtarlar ücretsiz!" (mesajı değiştirebilirsiniz) gösterilir ve oyun
+başlar.
+
+- Gün, **sitenizin saat dilimine** göre hesaplanır — cihazın saatine göre
+  değil. Böylece farklı saat dilimlerindeki oyuncular için gün aynı anda
+  başlayıp biter.
+- Oyun açıkken yapılan düzenli lisans denetimi de ücretsiz günde **atlanır**;
+  aksi halde anahtarsız giren oyuncu on dakika sonra oyundan atılırdı.
+- Sıralama adı adımı atlanmaz (o anahtar ekranı değil).
+- Sunucuya ulaşılamazsa sessizce normal akışa dönülür; ağ sorunu yüzünden
+  kimse kapıda kalmaz.
+
+### 🔔 Duyuru bildirimleri (eklentiden gönderilir)
+
+Eklenti panelindeki **"Push Bildirim Gönder"** bölümünden başlık + mesaj
+yazıp gönderdiğinizde, duyuru oyuncuların **bildirim çekmecesine** düşer.
+Belirli bir oyuna ya da (oyun kimliği boş bırakılırsa) tüm oyunlara
+gönderebilirsiniz.
+
+**Bu gerçek "push" (FCM) değil, çekme (polling) yöntemidir.** Gerçek push bir
+Firebase projesi, `google-services.json` ve `firebase-messaging` bağımlılığı
+isterdi; bu entegrasyonun tamamı bilinçli olarak **sıfır ek Gradle
+bağımlılığıyla** yazıldı. Bunun yerine:
+
+- **Oyun açıkken:** düzenli denetimde sorulur (hızlı iletim).
+- **Oyun kapalıyken:** `JobScheduler` ile ~15 dakikada bir sorulur
+  (Android'in periyodik işler için izin verdiği en kısa aralık).
+
+Kullanıcı açısından sonuç aynı — gerçek bir sistem bildirimi belirir; fark
+yalnızca iletim gecikmesinde. Android 13+ için `POST_NOTIFICATIONS` izni
+`android.json`'a otomatik eklenir ve ilk açılışta istenir; reddedilirse
+yalnızca bildirimler gösterilemez, oyun ve lisans akışı aynen çalışır.
+
+Bir cihaz ilk kez sorduğunda **eski duyurular topluca yağdırılmaz**; imleç
+ileri alınır ve yalnızca o andan sonraki duyurular bildirim olur.
 
 ### Her zaman etkin olanlar
 
@@ -302,6 +336,30 @@ Ren'Py, Android ikonunu proje kökündeki **iki** 432×432 PNG dosyasından
   oranlı küçültülür, beyaz opak arka planla eşleştirilir.
 - **Space'e gömmek:** Bu depoya `icon.png` / `icon.jpg` ekleyip yeniden
   build alın; o andan itibaren her derlemede otomatik kullanılır.
+
+---
+
+## 🔌 WordPress eklentisi (v8.8)
+
+`wordpress/aerokey.php` dosyası, mevcut eklentinizin **güncellenmiş** hâlidir.
+Sitenizdeki dosyanın üzerine yazın (ya da eklentiyi yeniden yükleyin).
+
+Eklenen şeyler — **mevcut mekaniklerin hiçbiri değiştirilmedi**, yalnızca
+üzerine eklendi:
+
+| Ne | Nerede |
+|---|---|
+| `aerokey_duyurular` tablosu | Yeni tablo; mevcut dört tablo aynen duruyor |
+| `GET /wp-json/lisans/v1/durum` | Yeni uç; mevcut uçların hiçbiri değişmedi |
+| "Ücretsiz Erişim Günleri" paneli | Admin sayfasına eklendi |
+| "Push Bildirim Gönder" paneli | Admin sayfasına eklendi |
+
+Kart çevirme, pity, referans, anket, görev anahtarı, VIP, `/sync`,
+`/oyun-suresi` ve kısa kod — hepsi olduğu gibi korundu.
+
+Yeni tablo, eklenti güncellendiğinde `plugins_loaded` denetimiyle
+kendiliğinden oluşur; eski kurulumlarda activation hook yeniden çalışmadığı
+için bu denetim gerekli.
 
 ---
 
