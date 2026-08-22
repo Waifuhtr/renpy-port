@@ -58,6 +58,9 @@ class AeroKeyGateActivity : Activity() {
 
     private var busy = false
 
+    /** Ad adımındaki avatar seçici; ekran kapanırken GIF'i durdurulur. */
+    private var avatarPicker: AvatarPicker? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -209,7 +212,7 @@ class AeroKeyGateActivity : Activity() {
             if (isFinishing) return@postDelayed
             overlay.animate().alpha(0f).setDuration(240).withEndAction {
                 root.removeView(overlay)
-                if (AeroKeyPrefs.usernameChosen(this)) showFarewell() else showUsernameStep()
+                continueAfterAccess()
             }.start()
         }, 2200)
     }
@@ -229,24 +232,30 @@ class AeroKeyGateActivity : Activity() {
             isVerticalScrollBarEnabled = false
             isFillViewport = true
             clipToPadding = false
-            setPadding(dp(20), dp(48), dp(20), dp(32))
+            setPadding(dp(18), dp(26), dp(18), dp(16))
         }
 
-        val holder = column().apply { gravity = Gravity.CENTER_HORIZONTAL }
+        // DİKEYDE ORTALA. fillViewport, içerik ekrandan kısaysa bu düzeni
+        // ekran boyuna kadar geriyordu ve artan yer tamamen ALTTA birikip
+        // kartın altında uzun boş bir bant bırakıyordu. Ortalayınca artan
+        // yer yukarı/aşağı eşit dağılıyor, o bant kalmıyor.
+        val holder = column().apply {
+            gravity = Gravity.CENTER_HORIZONTAL or Gravity.CENTER_VERTICAL
+        }
 
         val banner = buildBanner()
         if (banner != null) {
             holder.addView(banner)
-            holder.addSpace(dp(20))
+            holder.addSpace(dp(14))
         }
 
         holder.addView(buildHeader())
-        holder.addSpace(dp(22))
+        holder.addSpace(dp(16))
 
         // Kart, dönen gradyan kenarlığın üstünde durur: cam yüzey + canlı
         // çerçeve birlikte, sade bir kutu yerine derinlikli bir yüzey verir.
         card = column().apply {
-            setPadding(dp(24), dp(26), dp(24), dp(26))
+            setPadding(dp(22), dp(22), dp(22), dp(22))
         }
         buildCardContent(card)
 
@@ -272,9 +281,9 @@ class AeroKeyGateActivity : Activity() {
             )
         )
 
-        holder.addSpace(dp(14))
+        holder.addSpace(dp(10))
         holder.addView(buildTrustRow())
-        holder.addSpace(dp(14))
+        holder.addSpace(dp(10))
         holder.addView(buildDeviceIdChip())
 
         // Liderlik / profil / anket / hata bildirimi burada DEĞİL: bunlar
@@ -282,7 +291,7 @@ class AeroKeyGateActivity : Activity() {
         // Giriş ekranının tek işi doğrulama; oyuncu daha oyuna girmeden
         // liderlik tablosuna bakmak istemez.
 
-        holder.addSpace(dp(16))
+        holder.addSpace(dp(10))
         holder.addView(bodyText("AeroKey ile korunmaktadır", 11f).apply {
             setTextColor(Palette.textMuted)
             gravity = Gravity.CENTER
@@ -313,25 +322,36 @@ class AeroKeyGateActivity : Activity() {
     private fun buildBanner(): View? {
         val drawable = loadBannerDrawable() ?: return null
 
-        val image = ImageView(this).apply {
-            setImageDrawable(drawable)
-            // 500x288 oranını koruyup kartın genişliğine sığdırıyoruz.
-            adjustViewBounds = true
-            scaleType = ImageView.ScaleType.FIT_CENTER
+        // Hareketli afişi burada başlatıyoruz: yükleyici artık kendi
+        // başlatmıyor, çünkü aynı yükleyiciyi avatar ızgarası da kullanıyor
+        // ve orada oynatma kararı seçime göre veriliyor.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            (drawable as? android.graphics.drawable.AnimatedImageDrawable)?.apply {
+                repeatCount = android.graphics.drawable.AnimatedImageDrawable.REPEAT_INFINITE
+                start()
+            }
         }
 
-        // Afişin köşeleri kartlarla aynı yuvarlaklıkta olsun diye bir
-        // çerçeveye alıyoruz; ayrıca ince bir kenarlık afişi arka plandan
-        // ayırıyor.
+        // Afiş 500x288 tasarlanıyor. Yüksekliği bu orandan hesaplayıp
+        // ölçeklemeyi CENTER_CROP'a bırakıyoruz: görselin kendi oranı ne
+        // olursa olsun kutu TAMAMEN dolar, kenarlarda boşluk kalmaz.
+        // (Eski hali FIT_CENTER idi ve oran tutmayınca üstte/altta siyah
+        // bant bırakıyordu.)
+        val image = AspectImageView(this, 500f / 288f).apply {
+            setImageDrawable(drawable)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+        }
+
+        // Köşeleri yuvarlatmak için çerçeveye alıyoruz. Dolgu YOK: en ufak
+        // bir iç boşluk bile "kutuyu tamamen doldur" isteğini bozardı.
         val frame = FrameLayout(this).apply {
             background = GradientDrawable().apply {
                 cornerRadius = dp(18).toFloat()
                 setColor(Color.parseColor("#3D0D1226"))
-                setStroke(dp(1), Palette.surfaceBorder)
             }
-            setPadding(dp(4), dp(4), dp(4), dp(4))
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                 clipToOutline = true
+                elevation = dp(8).toFloat()
             }
             addView(
                 image,
@@ -342,7 +362,25 @@ class AeroKeyGateActivity : Activity() {
             )
         }
 
-        return frame.apply {
+        // Afişin çevresinde dönen ışık çizgisi — kartla aynı görsel dil.
+        val glow = FrameLayout(this).apply {
+            addView(
+                frame,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+            addView(
+                GlowBorderView(this@AeroKeyGateActivity),
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+        }
+
+        return glow.apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
             )
@@ -463,7 +501,7 @@ class AeroKeyGateActivity : Activity() {
 
         val chip = row().apply {
             background = GradientDrawableCompat.pill(this@AeroKeyGateActivity)
-            setPadding(dp(16), dp(12), dp(12), dp(12))
+            setPadding(dp(14), dp(9), dp(9), dp(9))
         }
 
         val texts = column()
@@ -638,9 +676,113 @@ class AeroKeyGateActivity : Activity() {
             }
             .start()
 
-        root.postDelayed({
-            if (AeroKeyPrefs.usernameChosen(this)) showFarewell() else showUsernameStep()
-        }, 620)
+        root.postDelayed({ continueAfterAccess() }, 620)
+    }
+
+    // --- Bulut kimliği ----------------------------------------------------
+
+    /**
+     * Erişim onaylandıktan sonraki adım: ad ekranı mı, uğurlama mı?
+     *
+     * Yerelde ad seçilmiş görünmüyorsa SUNUCUYA soruyoruz. Oyuncu oyunu
+     * silip yeniden kurduğunda SharedPreferences sıfırlanır ama cihaz
+     * kimliği (ANDROID_ID) aynı kalır — üstelik tüm oyunlar AYNI imza
+     * anahtarıyla imzalandığı için bu kimlik oyundan oyuna da aynıdır.
+     * Yani sunucuda bu cihaza bağlı bir ad varsa onu geri yükleyip ad
+     * ekranını hiç göstermiyoruz.
+     *
+     * Ağ yoksa ad ekranını gösteririz: oyuncuyu kapıda bekletmektense
+     * adı bir kez daha sormak yeğdir (girdiği ad zaten sunucudakinin
+     * üzerine yazılır).
+     */
+    private fun continueAfterAccess() {
+        if (isFinishing) return
+
+        if (AeroKeyPrefs.usernameChosen(this)) {
+            showFarewell()
+            return
+        }
+
+        setBusy(true)
+        val deviceId = AeroKeyPrefs.deviceId(this)
+        AeroKeyAsync.run({ AeroKeyApi.identity(deviceId) }) { identity ->
+            if (isFinishing) return@run
+            setBusy(false)
+            if (identity.registered) {
+                AeroKeyPrefs.adoptCloudIdentity(this, identity.username, identity.avatar)
+                showWelcomeBack(identity.username)
+            } else {
+                showUsernameStep()
+            }
+        }
+    }
+
+    /**
+     * Buluttan tanınan oyuncuya kısa bir "tekrar hoş geldin" ekranı.
+     *
+     * Adın neden sorulmadığını açıklıyor: aksi halde oyuncu, ad ekranının
+     * atlanmasını hata sanabilir.
+     */
+    private fun showWelcomeBack(name: String) {
+        card.removeAllViews()
+
+        val avatarRow = row().apply { gravity = Gravity.CENTER }
+        avatarRow.addView(
+            AvatarView(this).apply {
+                setFallbackLetter(name)
+                highlighted = true
+                val asset = AeroKeyPrefs.avatar(this@AeroKeyGateActivity)
+                if (asset.isNotBlank()) {
+                    setAvatarDrawable(
+                        loadAssetDrawable(asset, animated = true), true
+                    )
+                }
+            },
+            LinearLayout.LayoutParams(dp(72), dp(72))
+        )
+        card.addView(avatarRow)
+        card.addSpace(dp(12))
+
+        card.addView(TextView(this).apply {
+            text = "Tekrar hoş geldin"
+            setTextColor(Palette.textSecondary)
+            textSize = 13f
+            gravity = Gravity.CENTER
+        })
+        card.addSpace(dp(4))
+
+        val title = TextView(this).apply {
+            text = name
+            textSize = 26f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setTextColor(Palette.textPrimary)
+            post {
+                if (width > 0) {
+                    paint.shader = LinearGradient(
+                        0f, 0f, width.toFloat(), 0f,
+                        intArrayOf(Palette.accentAlt, Palette.accent, Palette.accentWarm),
+                        null, Shader.TileMode.CLAMP
+                    )
+                    invalidate()
+                }
+            }
+        }
+        card.addView(title)
+        card.addSpace(dp(8))
+        card.addView(bodyText(
+            "Profilin cihazına bağlı olarak bulutta saklanıyor, " +
+                "bu yüzden adını tekrar sormuyoruz."
+        ).apply { gravity = Gravity.CENTER })
+
+        card.enterWithFade(0)
+        title.scaleX = 0.85f
+        title.scaleY = 0.85f
+        title.animate().scaleX(1f).scaleY(1f).setDuration(400)
+            .setInterpolator(android.view.animation.OvershootInterpolator(1.3f))
+            .start()
+
+        root.postDelayed({ if (!isFinishing) showFarewell() }, 1500)
     }
 
     // --- Kullanıcı adı adımı ---------------------------------------------
@@ -666,9 +808,37 @@ class AeroKeyGateActivity : Activity() {
         card.addSpace(dp(6))
         card.addView(bodyText(
             "Bu ad liderlik tablosunda ve profilinde görünecek. " +
-                "Cihazına kalıcı olarak kaydedilir, bir daha sorulmaz."
+                "Cihazına bağlı olarak BULUTTA saklanır: oyunu silsen de, " +
+                "başka bir oyunumuzu kursan da seni tanır."
         ))
         card.addSpace(dp(14))
+
+        // Avatar seçimi — yalnızca paketlenmiş avatar varsa gösterilir.
+        val avatars = avatarAssets()
+        if (avatars.isNotEmpty()) {
+            card.addView(sectionLabel("PROFİL GÖRSELİ"))
+            card.addSpace(dp(8))
+            val picker = AvatarPicker(
+                this,
+                avatars,
+                AeroKeyPrefs.avatar(this).ifBlank { avatars.first() },
+                AeroKeyPrefs.username(this)
+            ) { chosen -> AeroKeyPrefs.setAvatar(this, chosen) }
+            avatarPicker = picker
+            // Hiç seçim yapılmazsa da bir avatarı varsayılan kabul ediyoruz;
+            // aksi halde "seçmedim" hali sunucuya boş gidiyordu.
+            if (AeroKeyPrefs.avatar(this).isBlank()) {
+                AeroKeyPrefs.setAvatar(this, picker.selection)
+            }
+            card.addView(
+                picker,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+            card.addSpace(dp(16))
+        }
 
         val nameInput = styledInput("örn. GölgeAvcısı").apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
@@ -732,11 +902,17 @@ class AeroKeyGateActivity : Activity() {
         AeroKeyPrefs.markUsernameChosen(this)
 
         val deviceId = AeroKeyPrefs.deviceId(this)
+        val avatar = AeroKeyPrefs.avatar(this)
         val achievements = AeroKeyPrefs.achievementsRaw(this)
         val total = AeroKeySession.currentTotalSeconds(this)
         val game = AeroKeySession.currentGameSeconds(this)
 
         AeroKeyAsync.run({
+            // ÖNCE /kimlik: adı ve avatarı cihaz kimliğine kalıcı bağlar.
+            // /sync bu iş için yeterli DEĞİL — orada ad yalnızca gönderilen
+            // süre sunucudakinden büyükse yazılıyor, ad yeni seçildiğinde
+            // ise süre genelde eşit kalıyor ve ad hiç işlenmiyordu.
+            AeroKeyApi.saveIdentity(deviceId, name, avatar)
             AeroKeyApi.sync(
                 deviceId, name, total, AeroKeyConfig.GAME_ID, game, achievements
             )
@@ -751,13 +927,20 @@ class AeroKeyGateActivity : Activity() {
     private fun showFarewell() {
         card.removeAllViews()
 
-        card.addView(TextView(this).apply {
-            text = "✓"
-            setTextColor(Palette.success)
-            textSize = 40f
-            gravity = Gravity.CENTER
-        })
-        card.addSpace(dp(6))
+        val badgeRow = row().apply { gravity = Gravity.CENTER }
+        badgeRow.addView(
+            AvatarView(this).apply {
+                setFallbackLetter(AeroKeyPrefs.username(this@AeroKeyGateActivity))
+                highlighted = true
+                val asset = AeroKeyPrefs.avatar(this@AeroKeyGateActivity)
+                if (asset.isNotBlank()) {
+                    setAvatarDrawable(loadAssetDrawable(asset, animated = true), true)
+                }
+            },
+            LinearLayout.LayoutParams(dp(64), dp(64))
+        )
+        card.addView(badgeRow)
+        card.addSpace(dp(10))
 
         val title = TextView(this).apply {
             text = "İyi oyunlar!"
@@ -861,6 +1044,14 @@ class AeroKeyGateActivity : Activity() {
         } catch (_: Exception) {
             // Klavye zaten kapalıysa önemsiz.
         }
+    }
+
+    override fun onDestroy() {
+        // Oynayan avatar GIF'ini serbest bırak: ekran kapandıktan sonra
+        // kare üretmeye devam etmesinin anlamı yok.
+        avatarPicker?.release()
+        avatarPicker = null
+        super.onDestroy()
     }
 
     override fun onBackPressed() {

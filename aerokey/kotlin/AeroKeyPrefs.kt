@@ -110,6 +110,24 @@ internal object AeroKeyPrefs {
         prefs(context).edit().putString(K_USERNAME, clean).apply()
     }
 
+    // --- Profil görseli (avatar) -----------------------------------------
+
+    private const val K_AVATAR = "avatar_asset"
+
+    /**
+     * Oyuncunun seçtiği avatarın APK assets içindeki dosya adı.
+     *
+     * Boş string "avatar seçilmedi" demektir; o durumda adın ilk harfinden
+     * üretilen bir rozet gösterilir. Ad gibi bu da cihaz kimliğine bağlı
+     * olarak buluta yazılır, yani oyun silinip kurulunca geri gelir.
+     */
+    fun avatar(context: Context): String =
+        prefs(context).getString(K_AVATAR, "") ?: ""
+
+    fun setAvatar(context: Context, asset: String) {
+        prefs(context).edit().putString(K_AVATAR, asset.trim()).apply()
+    }
+
     private const val K_USERNAME_CHOSEN = "username_chosen"
 
     /**
@@ -125,6 +143,24 @@ internal object AeroKeyPrefs {
 
     fun markUsernameChosen(context: Context) {
         prefs(context).edit().putBoolean(K_USERNAME_CHOSEN, true).apply()
+    }
+
+    /**
+     * Buluttan gelen kimliği yerele yazar.
+     *
+     * Oyuncu oyunu silip yeniden kurduğunda yerel ayarlar sıfırlanır ama
+     * cihaz kimliği (ANDROID_ID) aynı kaldığı için sunucudaki kayıt
+     * bulunabilir. Burası o kaydı geri yükler ve adı "seçilmiş" işaretler;
+     * böylece ad ekranı bir daha gösterilmez.
+     */
+    fun adoptCloudIdentity(context: Context, name: String, avatarAsset: String) {
+        val clean = name.trim().take(50)
+        if (clean.isBlank()) return
+        prefs(context).edit()
+            .putString(K_USERNAME, clean)
+            .putString(K_AVATAR, avatarAsset.trim())
+            .putBoolean(K_USERNAME_CHOSEN, true)
+            .apply()
     }
 
     // --- Oynama süreleri -------------------------------------------------

@@ -1,0 +1,34 @@
+PROFİL GÖRSELLERİ (AVATARLAR)
+=============================
+
+Oyuncuların seçebileceği avatar GIF'lerini BU KLASÖRE koy.
+
+  aerokey/avatars/01.gif
+  aerokey/avatars/02.gif
+  aerokey/avatars/03.gif
+  ...
+
+Kurallar
+--------
+
+  * Kabul edilen uzantılar: .gif, .png, .webp, .jpg, .jpeg
+  * Sıra ALFABETİKTİR. Bu yüzden 01, 02, 03 gibi adlar kullan.
+    Sıra önemli: oyuncunun seçimi sunucuda sıra numarasına göre
+    saklanıyor. Araya sonradan dosya eklersen sonraki avatarların
+    numarası kayar ve eski oyuncular başka bir avatar görür.
+    Yeni avatarları HER ZAMAN listenin SONUNA ekle.
+  * Kare (1:1) tasarla — avatar daire olarak kırpılıyor.
+  * 256x256 fazlasıyla yeterli. Daha büyüğü APK'yı şişirir.
+  * Dosya başına 300 KB altını hedefle.
+  * 6-12 avatar iyi bir sayı.
+
+Bu klasör boşsa avatar seçme adımı hiç gösterilmez; oyuncunun adının
+ilk harfinden üretilen renkli bir rozet kullanılır. Yani avatar
+koymak zorunda değilsin.
+
+Kare hızı
+---------
+
+Seçim ekranında aynı anda YALNIZCA bir GIF oynar: seçili olan.
+Diğerleri küçültülmüş tek bir durağan kare olarak çizilir. Bu yüzden
+çok sayıda avatar koymak oyunu yavaşlatmaz.

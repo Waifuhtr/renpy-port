@@ -36,6 +36,15 @@ internal object AeroKeyConfig {
     /** Afişin APK assets klasöründeki adı (HAS_BANNER true ise anlamlı). */
     const val BANNER_ASSET: String = "aerokey_banner.gif"
 
+    // --- Profil görselleri (avatar) --------------------------------------
+    /**
+     * Seçilebilir avatarların assets adları, virgülle ayrılmış.
+     *
+     * Boşsa avatar seçme adımı hiç gösterilmez; oyuncunun adının ilk
+     * harfinden üretilen renkli bir rozet kullanılır.
+     */
+    const val AVATARS: String = ""
+
     // --- Bildirimler ------------------------------------------------------
     /** Eklentiden gelen duyurular bildirim olarak gösterilsin mi? */
     const val NOTIFICATIONS_ENABLED: Boolean = false

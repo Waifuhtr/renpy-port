@@ -54,6 +54,7 @@ DEFAULT_KOTLIN_VERSION = "2.2.20"
 
 # Kotlin kaynaklarının bu betiğe göre konumu.
 KOTLIN_SOURCE_DIR = Path(__file__).resolve().parent / "kotlin"
+AVATAR_SOURCE_DIR = Path(__file__).resolve().parent / "avatars"
 
 
 class PatchError(RuntimeError):
@@ -385,6 +386,63 @@ def install_banner(sdk: Path, source: Optional[Path]) -> Optional[str]:
             shutil.copy2(source, target / asset_name)
 
     return asset_name
+
+
+# Avatarlar da afiş gibi assets'e kopyalanır. Kaynak dosya adlarını
+# OLDUĞU GİBİ kullanmıyoruz: kullanıcı boşluklu/Türkçe karakterli adlar
+# koyabilir ve bu adlar hem Kotlin sabitine hem sunucuya gideceği için
+# sadeleştirilmiş, sıralı adlarla yeniden yazıyoruz.
+AVATAR_STEM = "aerokey_avatar"
+AVATAR_SUFFIXES = (".gif", ".png", ".webp", ".jpg", ".jpeg")
+
+
+def collect_avatar_sources(extra_dir: Optional[Path] = None) -> list[Path]:
+    """
+    Paketlenecek avatar dosyalarını toplar.
+
+    Öncelik sırası: derleme sırasında yüklenen klasör (varsa), yoksa
+    depodaki `aerokey/avatars/`. Alfabetik sıralıyoruz ki avatar numaraları
+    derlemeden derlemeye kaymasın — numara oyuncunun seçimi olarak
+    sunucuda saklandığı için sıranın kararlı olması gerekiyor.
+    """
+    roots = [d for d in (extra_dir, AVATAR_SOURCE_DIR) if d is not None and d.is_dir()]
+    for root in roots:
+        found = sorted(
+            (p for p in root.iterdir()
+             if p.is_file() and p.suffix.lower() in AVATAR_SUFFIXES),
+            key=lambda p: p.name.lower(),
+        )
+        if found:
+            return found
+    return []
+
+
+def install_avatars(sdk: Path, sources: list[Path]) -> list[str]:
+    """
+    Avatar görsellerini APK assets'ine kopyalar ve varlık adlarını döner.
+
+    Her çağrıda önce eski avatarlar silinir; böylece bir avatar kaldırıldığında
+    APK'da bayat bir kopya kalmaz.
+    """
+    asset_names: list[str] = []
+
+    for target in asset_target_dirs(sdk):
+        target.mkdir(parents=True, exist_ok=True)
+        for stale in target.glob(f"{AVATAR_STEM}_*"):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+
+        names: list[str] = []
+        for index, source in enumerate(sources, start=1):
+            suffix = source.suffix.lower() or ".gif"
+            name = f"{AVATAR_STEM}_{index:02d}{suffix}"
+            shutil.copy2(source, target / name)
+            names.append(name)
+        asset_names = names
+
+    return asset_names
 
 
 def install_kotlin_sources(sdk: Path) -> int:
@@ -862,6 +920,7 @@ def render_config(values: dict) -> str:
         "GAME_TITLE": "Ren'Py Game",
         "HAS_BANNER": False,
         "BANNER_ASSET": "aerokey_banner.gif",
+        "AVATARS": "",
         "NOTIFICATIONS_ENABLED": False,
         "FEATURE_LEADERBOARD": False,
         "FEATURE_SURVEY": False,
@@ -881,6 +940,7 @@ def render_config(values: dict) -> str:
         "GAME_TITLE": "String",
         "HAS_BANNER": "Boolean",
         "BANNER_ASSET": "String",
+        "AVATARS": "String",
         "NOTIFICATIONS_ENABLED": "Boolean",
         "FEATURE_LEADERBOARD": "Boolean",
         "FEATURE_SURVEY": "Boolean",
@@ -905,7 +965,10 @@ def render_config(values: dict) -> str:
 
 
 def stamp_config(
-    sdk: Path, values: dict, banner_source: Optional[Path] = None
+    sdk: Path,
+    values: dict,
+    banner_source: Optional[Path] = None,
+    avatar_dir: Optional[Path] = None,
 ) -> list[Path]:
     """
     Derlemeye özel AeroKeyConfig.kt dosyasını, ilgili TÜM konumlara yazar.
@@ -923,6 +986,11 @@ def stamp_config(
     values["HAS_BANNER"] = asset_name is not None
     if asset_name:
         values["BANNER_ASSET"] = asset_name
+
+    # Avatarlar: hangi dosyaların gerçekten paketlendiğini tek yerden
+    # bilmek, Kotlin tarafının var olmayan bir varlığı açmasını engeller.
+    avatar_names = install_avatars(sdk, collect_avatar_sources(avatar_dir))
+    values["AVATARS"] = ",".join(avatar_names)
 
     content = render_config(values)
     written: list[Path] = []

@@ -239,6 +239,9 @@ internal object AeroKeySession {
         freeAccess = active
     }
 
+    /** Oyun içi menünün lisans durumunu yazabilmesi için. */
+    fun isFreeAccess(): Boolean = freeAccess
+
     /**
      * Düzenli denetim: önce sunucu durumunu (ücretsiz gün + yeni duyurular)
      * sorar, sonra gerekiyorsa lisansı doğrular.

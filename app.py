@@ -1353,11 +1353,26 @@ def _execute_build(
         else:
             origin = "bu derleme için yüklendi" if req.banner_path else "Space imajına gömülü"
             banner_note = f'"{banner_source.name}" ({origin})'
+
+        # Avatarlar depodaki aerokey/avatars/ klasöründen gelir; klasör
+        # boşsa avatar adımı hiç gösterilmez (rozet kullanılır).
+        avatar_sources = patch_rapt.collect_avatar_sources()
+        if avatar_sources:
+            avatar_note = (
+                f"{len(avatar_sources)} adet ("
+                + ", ".join(p.name for p in avatar_sources[:4])
+                + (", …" if len(avatar_sources) > 4 else "")
+                + ")"
+            )
+        else:
+            avatar_note = "yok (adın ilk harfinden rozet üretilecek)"
+
         job.log(
             f"\nAeroKey lisans ekranı ETKİN.\n"
             f"  - sunucu   : {req.aerokey_base_url}\n"
             f'  - oyun_id  : "{game_id}"  ({id_note})\n'
-            f"  - afiş     : {banner_note}"
+            f"  - afiş     : {banner_note}\n"
+            f"  - avatarlar: {avatar_note}"
         )
         try:
             stamp_aerokey_config(

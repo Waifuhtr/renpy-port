@@ -124,6 +124,8 @@ internal object AeroKeyOverlay {
         button = null
         panel = null
         playtimeLabel = null
+        headerAvatar?.stopAnimation()
+        headerAvatar = null
         expanded = false
     }
 
@@ -327,6 +329,9 @@ internal object AeroKeyOverlay {
         val view = panel ?: return
         panel = null
         playtimeLabel = null
+        // Avatar GIF'i panel kapanınca kare üretmeye devam etmesin.
+        headerAvatar?.stopAnimation()
+        headerAvatar = null
         view.animate()
             .scaleX(0.9f).scaleY(0.9f).alpha(0f)
             .setDuration(170)
@@ -335,6 +340,9 @@ internal object AeroKeyOverlay {
     }
 
     // --- Panel içeriği ---------------------------------------------------
+
+    /** Menü başlığındaki avatar; panel kapanınca GIF'i durdurulur. */
+    private var headerAvatar: AvatarView? = null
 
     private fun buildPanel(activity: Activity): View {
         val card = LinearLayout(activity).apply {
@@ -346,7 +354,9 @@ internal object AeroKeyOverlay {
             }
         }
         card.addView(buildPanelHeader(activity))
-        card.addSpace(activity.dp(14))
+        card.addSpace(activity.dp(10))
+        card.addView(buildLicenseRow(activity))
+        card.addSpace(activity.dp(12))
         card.addView(buildActionRow(activity))
         card.addSpace(activity.dp(12))
         card.addView(buildPanelFooter(activity))
@@ -369,13 +379,18 @@ internal object AeroKeyOverlay {
     private fun buildPanelHeader(activity: Activity): View {
         val header = activity.row()
 
-        val marker = View(activity).apply {
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(Palette.accentAlt, Palette.accentWarm)
-            ).apply { cornerRadius = activity.dp(2).toFloat() }
+        // Oyuncunun avatarı. Seçilmemişse adın ilk harfinden rozet çizilir,
+        // yani burada asla boş bir kutu görünmez.
+        val avatar = AvatarView(activity).apply {
+            setFallbackLetter(AeroKeyPrefs.username(activity))
+            highlighted = true
+            val asset = AeroKeyPrefs.avatar(activity)
+            if (asset.isNotBlank()) {
+                setAvatarDrawable(activity.loadAssetDrawable(asset, animated = true), true)
+            }
         }
-        header.addView(marker, LinearLayout.LayoutParams(activity.dp(3), activity.dp(30)))
+        headerAvatar = avatar
+        header.addView(avatar, LinearLayout.LayoutParams(activity.dp(38), activity.dp(38)))
 
         val titles = activity.column().apply {
             setPadding(activity.dp(10), 0, activity.dp(10), 0)
@@ -415,6 +430,80 @@ internal object AeroKeyOverlay {
         updatePlaytime()
 
         return header
+    }
+
+    /**
+     * Lisans durumu satırı: oyuncunun hangi hakla oynadığını ve ne zamana
+     * kadar geçerli olduğunu gösterir.
+     *
+     * Sıralama önemli: ücretsiz gün, anahtarın/VIP'in ÖNÜNE geçer, çünkü o
+     * gün lisans hiç denetlenmiyor.
+     */
+    private fun buildLicenseRow(activity: Activity): View {
+        val (icon, label, detail, tint) = when {
+            AeroKeySession.isFreeAccess() -> Quad(
+                "🎁", "Ücretsiz gün", "Bugün anahtar gerekmiyor", Palette.gold
+            )
+            AeroKeyPrefs.isVip(activity) -> Quad(
+                "⭐", "VIP üyelik", expiryText(activity), Palette.gold
+            )
+            AeroKeyPrefs.licenseKey(activity).isNotBlank() -> Quad(
+                "🔑", "Anahtar etkin", expiryText(activity), Palette.success
+            )
+            else -> Quad(
+                "🔓", "Lisans yok", "Doğrulanmış bir erişim bulunamadı", Palette.textMuted
+            )
+        }
+
+        val rowView = activity.row().apply {
+            background = GradientDrawable().apply {
+                cornerRadius = activity.dp(13).toFloat()
+                setColor(Color.parseColor("#14FFFFFF"))
+                setStroke(activity.dp(1), Color.parseColor("#1FFFFFFF"))
+            }
+            setPadding(activity.dp(11), activity.dp(9), activity.dp(11), activity.dp(9))
+        }
+
+        rowView.addView(TextView(activity).apply {
+            text = icon
+            textSize = 15f
+        })
+
+        val texts = activity.column().apply {
+            setPadding(activity.dp(9), 0, 0, 0)
+        }
+        texts.addView(TextView(activity).apply {
+            text = label
+            setTextColor(tint)
+            textSize = 12.5f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        })
+        texts.addView(TextView(activity).apply {
+            text = detail
+            setTextColor(Palette.textMuted)
+            textSize = 10.5f
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        rowView.addView(
+            texts,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+
+        return rowView
+    }
+
+    /** Dört alanlı küçük bir taşıyıcı (Kotlin'de hazır Quadruple yok). */
+    private data class Quad(
+        val icon: String,
+        val label: String,
+        val detail: String,
+        val tint: Int
+    )
+
+    private fun expiryText(activity: Activity): String {
+        val text = AeroKeyPrefs.expiresText(activity)
+        return if (text.isBlank()) "Süre bilgisi yok" else "Bitiş: $text"
     }
 
     private fun buildActionRow(activity: Activity): View {

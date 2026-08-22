@@ -31,6 +31,8 @@ açık kaynak **renkit** aracını (`renutil` + `renconstruct`) otomatikleştiri
 | **Otomatik imzalama** | Kalıcı anahtar bir kez üretilir, her derlemede aynısı kullanılır |
 | **AeroKey lisans ekranı** | Kotlin ile yazılmış, oyundan önce açılan native giriş ekranı |
 | **Oyun süresi sayımı** | Oynanan süre sunucuya senkronlanır (Steam tarzı) |
+| **Bulut profili** | Ad + avatar cihaz kimliğine bağlanır: silip kursan da, başka oyununu kursan da seni tanır |
+| **Profil görselleri** | `aerokey/avatars/` klasörüne GIF koy; seçerken yalnızca seçili olan oynar |
 | Otomatik ikon | Tek kare görselden iki katmanlı adaptif ikon üretir |
 | Gradle ön belleklemesi | 504 / indirme hatalarını baştan engeller |
 | **Ücretsiz erişim günleri** | Eklentiden tarih verin, o gün anahtar sorulmaz |
@@ -231,16 +233,64 @@ Giriş ekranının üstünde bir görsel gösterebilirsiniz. Tasarım boyutu
   yeni bir GIF kütüphanesi eklemektense bu tercih edildi.
 - Afiş yoksa ekran afişsiz çizilir; hiçbir şey bozulmaz.
 
-### 🏷️ Sıralama adı (zorunlu, tek seferlik)
+### 🏷️ Sıralama adı ve profil (bulutta, cihaza bağlı)
 
 Lisans doğrulandıktan sonra, oyuncu **ilk kez** giriyorsa bir ad seçme
 ekranı çıkar (3-20 karakter, atlanamaz). Sebebi basit: liderlik tablosu
 adlarla çalışıyor ve herkesin `GizemliOyuncu` görünmesi tabloyu anlamsız
 kılardı.
 
-Seçilen ad **cihaz kimliğine bağlı olarak kalıcı** saklanır ve `POST /sync`
-ile sunucudaki kayda işlenir; bir daha sorulmaz. Ağ o an kopuksa oyuncu
-bekletilmez — ad yerelde durur ve ilk başarılı senkronda sunucuya gider.
+**Ad bir kez sorulur — sonsuza kadar.** Oyuncu oyunu silip yeniden kursa
+da, senin başka bir oyununu kursa da adı tekrar sorulmaz:
+
+1. Ad seçilince `POST /kimlik` ile **cihaz kimliğine bağlanır**.
+2. Sonraki her açılışta, yerelde ad yoksa `GET /kimlik` sorulur.
+3. Sunucu bu cihaza bağlı bir ad döndürürse ad ekranı **hiç gösterilmez**;
+   bunun yerine kısa bir "Tekrar hoş geldin" ekranı çıkar.
+
+> **Neden `/sync` yetmiyordu:** `/sync`, kullanıcı adını yalnızca gönderilen
+> toplam süre sunucudakinden **büyükse** yazıyor. Ad yeni seçildiğinde süre
+> genelde eşit kaldığı için ad sunucuya hiç işlenmiyordu. `/kimlik` adı
+> koşulsuz yazar ve `/sync`'in süre mantığına hiç dokunmaz.
+
+#### Bu neden tüm oyunlarda çalışıyor?
+
+Kimlik `ANDROID_ID`'ye dayanıyor. Android 8.0+ belgelerine göre bu değer
+**"app-signing key, user, and device" üçlüsünün her kombinasyonu için
+tekildir"** — paket adı bu üçlüde **yok**. Ayrıca **"imza anahtarı aynı
+kaldığı sürece paket kaldırılıp yeniden kurulduğunda değişmez."**
+
+Paketleyici tüm oyunları **tek bir kalıcı imza anahtarıyla** imzaladığı
+için (bkz. [İmzalama](#-i̇mzalama)), aynı cihazdaki tüm oyunların cihaz
+kimliği aynıdır ve silme/kurma bunu bozmaz.
+
+> ⚠️ **Bunun tek koşulu:** oyunların aynı anahtarla imzalanması. Bir oyun
+> için kendi keystore'unu yüklersen o oyun farklı bir kimlik görür. Aynı
+> şekilde Space'in kalıcı diski silinirse anahtar yeniden üretilir ve
+> **tüm** kimlikler sıfırlanır — kalıcı disk bu yüzden önemli.
+
+#### 🖼️ Profil görselleri (avatar)
+
+Avatarları depodaki **`aerokey/avatars/`** klasörüne koy:
+
+```
+aerokey/avatars/01.gif
+aerokey/avatars/02.gif
+aerokey/avatars/03.gif
+```
+
+* `.gif`, `.png`, `.webp`, `.jpg`, `.jpeg` kabul edilir.
+* Sıra **alfabetiktir** — `01`, `02`, `03` gibi adlar kullan.
+* Seçim sunucuda sıra numarasıyla saklandığı için **yeni avatarları hep
+  sonuna ekle**; araya eklemek eski oyuncuların avatarını kaydırır.
+* Kare (1:1) tasarla, avatar daire olarak kırpılıyor. 256x256 yeterli.
+* Klasör boşsa avatar adımı hiç çıkmaz; adın ilk harfinden renkli bir
+  rozet üretilir.
+
+**Kare hızı:** seçim ekranında aynı anda **yalnızca bir GIF oynar** —
+seçili olan. Diğerleri küçültülmüş tek bir durağan kare olarak çizilir
+(`inSampleSize` ile bellekte de küçültülür). Bu yüzden çok sayıda avatar
+koymak oyunu yavaşlatmaz.
 
 Ardından kısa bir **"İyi oyunlar!"** ekranı gösterilip oyun başlatılır.
 
@@ -250,8 +300,13 @@ Doğrulamadan sonra oyunun **sağ üst köşesinde sabit** bir menü düğmesi b
 Oyun yatay çalıştığı için panel de yatay düzende tasarlandı.
 
 - **Dokununca açılır** — düğmenin altından geniş ve alçak bir panel iner:
+  - solda **profil avatarınız** (seçmediyseniz adınızın ilk harfinden rozet),
   - başlıkta **hangi oyunda olduğunuz** ve oyuncu adınız,
   - yanında **canlı oynama süresi** (panel açıkken saniye saniye tazelenir),
+  - altında **lisans durumu** satırı — hangi hakla oynadığınız ve bitiş
+    tarihi: 🎁 Ücretsiz gün / ⭐ VIP üyelik / 🔑 Anahtar etkin / 🔓 Lisans yok.
+    Ücretsiz gün diğerlerinin önüne geçer, çünkü o gün lisans hiç
+    denetlenmiyor.
   - tek sıra hâlinde: 🏆 Liderlik, 👤 Profilim, 📊 Anket, 🐞 Hata Bildir.
 - **🙈 Menüyü gizle** — düğmeyi küçültüp neredeyse saydam yapar, yani oyunu
   örtmez. Yok olmaz: tek dokunuşla geri gelir. Durum kalıcı olarak saklanır.
@@ -400,7 +455,7 @@ Ren'Py, Android ikonunu proje kökündeki **iki** 432×432 PNG dosyasından
 
 ---
 
-## 🔌 WordPress eklentisi (v8.8)
+## 🔌 WordPress eklentisi (v8.9)
 
 `wordpress/aerokey.php` dosyası, mevcut eklentinizin **güncellenmiş** hâlidir.
 Sitenizdeki dosyanın üzerine yazın (ya da eklentiyi yeniden yükleyin).
@@ -414,13 +469,22 @@ Eklenen şeyler — **mevcut mekaniklerin hiçbiri değiştirilmedi**, yalnızca
 | `GET /wp-json/lisans/v1/durum` | Yeni uç; mevcut uçların hiçbiri değişmedi |
 | "Ücretsiz Erişim Günleri" paneli | Admin sayfasına eklendi |
 | "Push Bildirim Gönder" paneli | Admin sayfasına eklendi |
+| **`profil` sütunu** (v8.9) | `aerokey_istatistik` tablosuna eklendi |
+| **`GET/POST /kimlik`** (v8.9) | Yeni uç: cihaz kimliğine bağlı ad + avatar |
+
+`/durum`, `/liderlik` ve `/profil` uçları artık avatar bilgisini de
+döndürüyor — mevcut alanların hiçbiri kaldırılmadı, yalnızca yeni alan
+eklendi, yani eski istemciler etkilenmez.
 
 Kart çevirme, pity, referans, anket, görev anahtarı, VIP, `/sync`,
-`/oyun-suresi` ve kısa kod — hepsi olduğu gibi korundu.
+`/oyun-suresi` ve kısa kod — hepsi olduğu gibi korundu. Özellikle
+**`/sync`'in süre mantığına hiç dokunulmadı**; ad yazma işi ayrı bir uca
+(`/kimlik`) taşındı.
 
-Yeni tablo, eklenti güncellendiğinde `plugins_loaded` denetimiyle
-kendiliğinden oluşur; eski kurulumlarda activation hook yeniden çalışmadığı
-için bu denetim gerekli.
+Yeni tablo ve yeni sütun, eklenti güncellendiğinde `plugins_loaded`
+denetimiyle kendiliğinden oluşur; eski kurulumlarda activation hook
+yeniden çalışmadığı (ve mevcut tabloda `dbDelta` sütun eklemediği) için bu
+denetim gerekli.
 
 ---
 

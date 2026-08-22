@@ -100,6 +100,56 @@ internal object AeroKeyApi {
                 "&cihaz_id=" + enc(deviceId)
         )
 
+    /**
+     * Cihaza bağlı bulut kimliği: sıralama adı + avatar.
+     *
+     * Oyuncunun adını neden /sync ile değil de ayrı bir uçla kaydediyoruz:
+     * /sync, adı yalnızca gönderilen süre sunucudakinden BÜYÜKSE yazıyor.
+     * Ad yeni seçildiğinde süre genelde eşit kaldığı için ad sunucuya hiç
+     * işlenmiyordu — silip yeniden kuran oyuncuya adı tekrar sorulmasının
+     * asıl sebebi buydu.
+     */
+    data class Identity(
+        val registered: Boolean,
+        val username: String,
+        val avatar: String
+    )
+
+    /** GET /kimlik?cihaz_id=... — bu cihaza daha önce bağlanmış profil. */
+    fun identity(deviceId: String): Identity {
+        val res = get("/kimlik?cihaz_id=" + enc(deviceId))
+        return toIdentity(res)
+    }
+
+    /** POST /kimlik — adı ve avatarı cihaz kimliğine kalıcı olarak bağlar. */
+    fun saveIdentity(deviceId: String, username: String, avatar: String): Identity {
+        val body = JSONObject()
+        body.put("cihaz_id", deviceId)
+        body.put("kullanici_adi", username)
+        body.put("profil", avatar)
+        return toIdentity(post("/kimlik", body))
+    }
+
+    /**
+     * Kimlik yanıtını çözer.
+     *
+     * Eklentinin ESKİ sürümlerinde /kimlik yoktur; 404 gelir ve burası
+     * "kayıtlı değil" döner. Yani eski eklentiyle de akış kırılmaz, sadece
+     * ad bir kez daha sorulur.
+     */
+    private fun toIdentity(res: Result): Identity = when (res) {
+        is Result.Failed -> Identity(false, "", "")
+        is Result.Ok -> {
+            val body = res.body
+            val name = body.optString("kullanici_adi", "").trim()
+            Identity(
+                registered = body.optBoolean("kayitli", false) && name.isNotEmpty(),
+                username = name,
+                avatar = body.optString("profil", "").trim()
+            )
+        }
+    }
+
     /** GET /liderlik — en çok oynayan ilk 10 kişi. */
     fun leaderboard(): Result = get("/liderlik")
 

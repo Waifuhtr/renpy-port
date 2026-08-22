@@ -1,8 +1,8 @@
 <?php
 /**
- * Plugin Name: AeroKey Lisans Yöneticisi V8.8 (Gacha + Anket + Oyun Süresi + Ücretsiz Gün + Push Duyuru)
- * Description: Kart çevirme sistemi, pity, admin tabloları, gün/saat mantığı, Steam tarzı inceleme sistemi API'si, ücretsiz erişim günleri ve oyunlara push duyuru gönderimi.
- * Version: 8.8
+ * Plugin Name: AeroKey Lisans Yöneticisi V8.9 (Gacha + Anket + Oyun Süresi + Ücretsiz Gün + Push Duyuru + Bulut Kimlik)
+ * Description: Kart çevirme sistemi, pity, admin tabloları, gün/saat mantığı, Steam tarzı inceleme sistemi API'si, ücretsiz erişim günleri, oyunlara push duyuru gönderimi ve cihaz kimliğine bağlı bulut profili (kullanıcı adı + avatar).
+ * Version: 8.9
  * Author: Riaslink
  */
 
@@ -34,6 +34,7 @@ function aerokey_create_db_table() {
       davet_kodu varchar(20) DEFAULT NULL,
       kullanilan_davet tinyint(1) DEFAULT 0 NOT NULL,
       basarimlar text DEFAULT NULL,
+      profil varchar(60) DEFAULT '' NOT NULL,
       son_ucretsiz_kart date DEFAULT NULL,
       kart_pity int DEFAULT 0 NOT NULL,
       son_guncelleme datetime DEFAULT CURRENT_TIMESTAMP NOT NULL,
@@ -88,6 +89,14 @@ function aerokey_check_db_tables() {
     $row = $wpdb->get_results("SHOW COLUMNS FROM `$table_stats` LIKE 'kart_pity'");
     if(empty($row)) { aerokey_create_db_table(); }
 
+    // v8.9: cihaz kimligine bagli avatar sutunu. Eski kurulumlarda
+    // istatistik tablosu zaten var oldugu icin dbDelta calismiyor;
+    // sutunu burada kontrol edip ekliyoruz. Mevcut satirlar bozulmaz.
+    $profil_sutun = $wpdb->get_results("SHOW COLUMNS FROM `$table_stats` LIKE 'profil'");
+    if (empty($profil_sutun)) {
+        $wpdb->query("ALTER TABLE `$table_stats` ADD COLUMN profil varchar(60) NOT NULL DEFAULT ''");
+    }
+
     // v8.8: eklenti guncellendiginde yeni duyuru tablosu da olusmali.
     // Eski kurulumlarda activation hook yeniden calismadigi icin burada
     // kontrol ediyoruz.
@@ -114,6 +123,8 @@ add_action('rest_api_init', function () {
     // YENI (v8.8): oyun istemcisinin duzenli sordugu durum ucu --
     // "bugun ucretsiz gun mu" + "gormedigim yeni duyurular"
     register_rest_route('lisans/v1', '/durum', array('methods' => 'GET', 'callback' => 'aerokey_api_durum', 'permission_callback' => '__return_true'));
+    // v8.9: cihaz kimligine bagli bulut profili (kullanici adi + avatar).
+    register_rest_route('lisans/v1', '/kimlik', array('methods' => array('GET', 'POST'), 'callback' => 'aerokey_api_kimlik', 'permission_callback' => '__return_true'));
 });
 
 function aerokey_api_kontrol($request) {
@@ -299,7 +310,7 @@ function aerokey_api_referans($request) {
 
 function aerokey_api_liderlik($request) {
     global $wpdb; $table_stats = $wpdb->prefix . 'aerokey_istatistik';
-    $liste = $wpdb->get_results("SELECT kullanici_adi, toplam_saniye, basarimlar FROM $table_stats ORDER BY toplam_saniye DESC LIMIT 10", ARRAY_A);
+    $liste = $wpdb->get_results("SELECT kullanici_adi, toplam_saniye, basarimlar, profil FROM $table_stats ORDER BY toplam_saniye DESC LIMIT 10", ARRAY_A);
     return new WP_REST_Response(array('durum' => 'basarili', 'liste' => $liste ?: array()), 200);
 }
 
@@ -321,8 +332,8 @@ function aerokey_api_gorev_anahtar($request) {
 function aerokey_api_profil($request) {
     global $wpdb; $table_stats = $wpdb->prefix . 'aerokey_istatistik';
     $kullanici_adi = sanitize_text_field($request->get_param('kullanici_adi'));
-    $kayit = $wpdb->get_row($wpdb->prepare("SELECT kullanici_adi, toplam_saniye, basarimlar FROM $table_stats WHERE kullanici_adi = %s LIMIT 1", $kullanici_adi));
-    if($kayit) { return new WP_REST_Response(array('durum' => 'basarili', 'kullanici_adi' => $kayit->kullanici_adi, 'toplam_saniye' => $kayit->toplam_saniye, 'basarimlar' => json_decode($kayit->basarimlar, true)), 200); }
+    $kayit = $wpdb->get_row($wpdb->prepare("SELECT kullanici_adi, toplam_saniye, basarimlar, profil FROM $table_stats WHERE kullanici_adi = %s LIMIT 1", $kullanici_adi));
+    if($kayit) { return new WP_REST_Response(array('durum' => 'basarili', 'kullanici_adi' => $kayit->kullanici_adi, 'toplam_saniye' => $kayit->toplam_saniye, 'basarimlar' => json_decode($kayit->basarimlar, true), 'profil' => $kayit->profil), 200); }
     return new WP_REST_Response(array('durum' => 'hata'), 200);
 }
 
@@ -431,6 +442,7 @@ function aerokey_api_durum($request) {
 
     $oyun_id     = sanitize_text_field($request->get_param('oyun_id'));
     $son_duyuru  = intval($request->get_param('son_duyuru'));
+    $cihaz_id    = sanitize_text_field($request->get_param('cihaz_id'));
 
     $serbest = aerokey_bugun_serbest_mi();
     $serbest_mesaj = get_option('aerokey_serbest_mesaj', 'Bugün anahtarlar ücretsiz!');
@@ -461,6 +473,25 @@ function aerokey_api_durum($request) {
         $son_id = $en_yuksek;
     }
 
+    // v8.9: istemci zaten cihaz_id gonderiyordu ama sunucu okumuyordu.
+    // Bulut profilini de ayni yanitta donuyoruz; boylece oyun icindeki
+    // menu, ad baska bir cihazda/oyunda degistiyse onu yakalayabiliyor.
+    $bulut_ad = '';
+    $bulut_profil = '';
+    if (!empty($cihaz_id)) {
+        $table_stats = $wpdb->prefix . 'aerokey_istatistik';
+        $kimlik = $wpdb->get_row($wpdb->prepare(
+            "SELECT kullanici_adi, profil FROM $table_stats WHERE cihaz_id = %s", $cihaz_id
+        ));
+        if ($kimlik) {
+            $ad = trim($kimlik->kullanici_adi);
+            if ($ad !== '' && $ad !== 'GizemliOyuncu') {
+                $bulut_ad = $ad;
+                $bulut_profil = $kimlik->profil;
+            }
+        }
+    }
+
     return new WP_REST_Response(array(
         'durum'          => 'basarili',
         'serbest'        => $serbest,
@@ -468,8 +499,110 @@ function aerokey_api_durum($request) {
         'sunucu_tarihi'  => current_time('Y-m-d'),
         'duyurular'      => $duyurular,
         'son_duyuru_id'  => $son_id,
+        'kullanici_adi'  => $bulut_ad,
+        'profil'         => $bulut_profil,
     ), 200);
 }
+
+/**
+ * Cihaz kimligine bagli bulut profili.
+ *
+ * NEDEN AYRI BIR UC NOKTA: /sync kullanici adini yalnizca gonderilen
+ * toplam sure kayitli sureden BUYUKSE yaziyor. Oyuncu adini yeni sectiginde
+ * sure genelde esit kaldigi icin ad sunucuya hic islenmiyordu. Burasi adi
+ * kosulsuz yazar; /sync'in sure mantigina hic dokunmuyoruz.
+ *
+ * GET  ?cihaz_id=...            -> bu cihaza kayitli ad + avatar
+ * POST {cihaz_id,kullanici_adi,profil} -> adi ve avatari kalici olarak baglar
+ *
+ * Kimlik cihaz kimligine baglidir; oyun kimligine DEGIL. Boylece ayni
+ * cihazdaki tum oyunlar ayni profili gorur ve oyun silinip yeniden
+ * kurulunca ad tekrar sorulmaz.
+ */
+function aerokey_api_kimlik($request) {
+    global $wpdb; $table_stats = $wpdb->prefix . 'aerokey_istatistik';
+
+    $varsayilan_ad = 'GizemliOyuncu';
+
+    if ($request->get_method() === 'POST') {
+        $params = $request->get_json_params(); if(!$params) $params = $_POST;
+
+        $cihaz_id      = isset($params['cihaz_id']) ? sanitize_text_field($params['cihaz_id']) : '';
+        $kullanici_adi = isset($params['kullanici_adi']) ? sanitize_text_field($params['kullanici_adi']) : '';
+        $profil        = isset($params['profil']) ? aerokey_temiz_profil($params['profil']) : '';
+
+        if (empty($cihaz_id)) {
+            return new WP_REST_Response(array('durum' => 'hata', 'mesaj' => 'Cihaz kimligi gerekli.'), 400);
+        }
+
+        $uzunluk = function_exists('mb_strlen') ? mb_strlen($kullanici_adi) : strlen($kullanici_adi);
+        if ($uzunluk < 3 || $uzunluk > 20) {
+            return new WP_REST_Response(array('durum' => 'hata', 'mesaj' => 'Ad 3-20 karakter olmali.'), 200);
+        }
+
+        $kayit = $wpdb->get_row($wpdb->prepare("SELECT id FROM $table_stats WHERE cihaz_id = %s", $cihaz_id));
+        if ($kayit) {
+            $wpdb->update(
+                $table_stats,
+                array('kullanici_adi' => $kullanici_adi, 'profil' => $profil, 'son_guncelleme' => current_time('mysql')),
+                array('cihaz_id' => $cihaz_id)
+            );
+        } else {
+            $wpdb->insert($table_stats, array(
+                'cihaz_id'      => $cihaz_id,
+                'kullanici_adi' => $kullanici_adi,
+                'profil'        => $profil,
+                'toplam_saniye' => 0,
+                'davet_kodu'    => 'RIAS-' . strtoupper(substr(md5($cihaz_id . time()), 0, 5)),
+            ));
+        }
+
+        return new WP_REST_Response(array(
+            'durum'         => 'basarili',
+            'kayitli'       => true,
+            'kullanici_adi' => $kullanici_adi,
+            'profil'        => $profil,
+        ), 200);
+    }
+
+    $cihaz_id = sanitize_text_field($request->get_param('cihaz_id'));
+    if (empty($cihaz_id)) {
+        return new WP_REST_Response(array('durum' => 'hata', 'mesaj' => 'Cihaz kimligi gerekli.'), 400);
+    }
+
+    $kayit = $wpdb->get_row($wpdb->prepare(
+        "SELECT kullanici_adi, profil, toplam_saniye FROM $table_stats WHERE cihaz_id = %s", $cihaz_id
+    ));
+
+    // "Kayitli" saymak icin adin GERCEKTEN secilmis olmasi gerekir. /sync
+    // oyuncu adini secmeden once de bir satir acabildigi (ve o satira
+    // varsayilan adi yazdigi) icin, varsayilan ad kayitli sayilmaz --
+    // aksi halde oyuncuya ad sorma adimi hic gosterilmezdi.
+    $ad = $kayit ? trim($kayit->kullanici_adi) : '';
+    $secilmis = ($ad !== '' && $ad !== $varsayilan_ad);
+
+    return new WP_REST_Response(array(
+        'durum'         => 'basarili',
+        'kayitli'       => $secilmis,
+        'kullanici_adi' => $secilmis ? $ad : '',
+        'profil'        => ($kayit && $secilmis) ? $kayit->profil : '',
+        'toplam_saniye' => $kayit ? intval($kayit->toplam_saniye) : 0,
+    ), 200);
+}
+
+/**
+ * Avatar adini guvenli bir varlik adina indirger.
+ *
+ * Istemci buraya APK icindeki asset dosya adini yollar
+ * (ornegin aerokey_avatar_01.gif). Yol ayiricilarina ve bosluga hic izin
+ * vermiyoruz; deger daha sonra istemcide dosya adi olarak kullanilacak.
+ */
+function aerokey_temiz_profil($deger) {
+    $deger = is_string($deger) ? $deger : '';
+    $deger = preg_replace('/[^A-Za-z0-9._-]/', '', $deger);
+    return substr($deger, 0, 60);
+}
+
 
 // --- ADMIN PANEL KISMI ---
 
