@@ -295,7 +295,8 @@ body {
 
 input[type="text"],
 input[type="url"],
-input[type="password"] {
+input[type="password"],
+select {
   width: 100%;
   padding: 11px 13px;
   border-radius: var(--radius-sm);
@@ -307,9 +308,23 @@ input[type="password"] {
   transition: border-color 0.18s ease, box-shadow 0.18s ease;
 }
 
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-dim) 50%),
+                    linear-gradient(135deg, var(--text-dim) 50%, transparent 50%);
+  background-position: calc(100% - 18px) calc(50% + 2px), calc(100% - 13px) calc(50% + 2px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 34px;
+}
+select option { background: var(--surface-solid); color: var(--text); }
+
 input[type="text"]:focus,
 input[type="url"]:focus,
-input[type="password"]:focus {
+input[type="password"]:focus,
+select:focus {
   outline: none;
   border-color: var(--border-strong);
   box-shadow: 0 0 0 3px rgba(139, 124, 246, 0.16);

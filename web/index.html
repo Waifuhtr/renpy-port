@@ -197,10 +197,61 @@
       </div>
     </section>
 
+    <!-- ---------- Çeviri ---------- -->
+    <details class="card collapsible">
+      <summary>
+        <h2><span class="step">4</span> Çeviri paketi</h2>
+        <span class="summary-note">isteğe bağlı</span>
+      </summary>
+      <div class="collapsible-body">
+        <p class="explain">
+          Çeviri aracınızın ürettiği ZIP'i olduğu gibi yükleyin — içinden
+          hiçbir şey silmenize gerek yok. Araç, dosyaları <code>game/</code>
+          içine yerleştirir ve dilin oyunda <b>gerçekten seçilebilir</b>
+          olmasını sağlar.
+        </p>
+
+        <label class="field">
+          <span class="label">Çeviri ZIP dosyası</span>
+          <input type="file" id="translation" name="translation" accept=".zip">
+          <small class="hint">
+            İçinde <code>tl/&lt;dil&gt;/</code> klasörü olmalı.
+          </small>
+        </label>
+
+        <label class="field">
+          <span class="label">Dil davranışı</span>
+          <select id="translation_mode" name="translation_mode">
+            <option value="ask">Açılışta dil sor (önerilen)</option>
+            <option value="force">Her zaman çeviri dilinde aç</option>
+            <option value="files_only">Sadece dosyaları ekle</option>
+          </select>
+          <small class="hint">
+            <b>Açılışta sor:</b> ana menüden önce bir kez "Dil / Language"
+            ekranı çıkar, seçim kalıcı olarak saklanır. Oyun bunun için
+            gereken etiketi zaten kullanıyorsa araç bunu fark eder ve
+            çakışma yaratmak yerine dili doğrudan uygular.
+            <b>Sadece dosyaları ekle:</b> oyunun kendi ayarlar ekranında
+            zaten dil seçici varsa kullanın.
+          </small>
+        </label>
+
+        <div class="callout">
+          <strong>Neden gerekli?</strong>
+          Çeviri dosyalarını <code>game/</code> içine kopyalamak tek başına
+          yetmez: <code>translate &lt;dil&gt; strings:</code> blokları ancak
+          oyunun dili o dile <b>ayarlandığında</b> devreye girer. Derlenmiş
+          bir oyunun ekranlarına dil seçici ekleyemezsiniz, dolayısıyla dili
+          ayarlayacak bir şey olmaz ve çeviri hiç görünmez. Bu bölüm tam
+          olarak o eksik parçayı ekler.
+        </div>
+      </div>
+    </details>
+
     <!-- ---------- Gelişmiş ---------- -->
     <details class="card collapsible">
       <summary>
-        <h2><span class="step">4</span> İkon ve imzalama</h2>
+        <h2><span class="step">5</span> İkon ve imzalama</h2>
         <span class="summary-note">isteğe bağlı</span>
       </summary>
       <div class="collapsible-body">

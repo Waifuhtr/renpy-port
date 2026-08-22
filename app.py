@@ -39,7 +39,10 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.staticfiles import StaticFiles
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# `translation_pack` takma adı bilinçli: /api/build uç noktasının
+# `translation` adlı bir dosya parametresi var ve modülü gölgelerdi.
 from aerokey import patch_rapt  # noqa: E402  (yol ayarından sonra gelmeli)
+from aerokey import translation as translation_pack  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
@@ -1090,6 +1093,7 @@ class BuildRequest:
     zip_path: Path
     icon_path: Optional[Path]
     banner_path: Optional[Path]
+    translation_path: Optional[Path]
     keystore_path: Optional[Path]
     renpy_version: str
     want_apk: bool
@@ -1109,6 +1113,94 @@ class BuildRequest:
     aerokey_profile: bool
     aerokey_bug_report: bool
     aerokey_notifications: bool
+    translation_mode: str
+
+
+# Arayüzdeki dil modu değerlerinin okunur karşılıkları.
+_TRANSLATION_MODE_LABELS = {
+    "ask": "açılışta dil sorulacak",
+    "force": "oyun doğrudan çeviri dilinde açılacak",
+    "files_only": "yalnızca dosyalar eklenecek, dile dokunulmayacak",
+}
+
+# Ren'Py dil kodu -> menüde gösterilecek ad. Listede olmayan bir dil,
+# kodunun baş harfi büyütülerek gösterilir.
+_LANGUAGE_LABELS = {
+    "turkish": "Türkçe",
+    "english": "English",
+    "german": "Deutsch",
+    "french": "Français",
+    "spanish": "Español",
+    "italian": "Italiano",
+    "russian": "Русский",
+    "portuguese": "Português",
+    "japanese": "日本語",
+    "korean": "한국어",
+    "schinese": "简体中文",
+    "tchinese": "繁體中文",
+}
+
+
+def _install_translation(job: BuildJob, project_root: Path, req: BuildRequest) -> bool:
+    """
+    Çeviri paketini kurar ve günlüğe ne yapıldığını yazar.
+
+    Başarısızlık ÖLÜMCÜLdür: çeviri isteyip çevirisiz bir APK almak,
+    kullanıcının ancak oyunu açınca fark edeceği sessiz bir hata olurdu.
+    """
+    mode = req.translation_mode
+    job.log(
+        f"\nÇeviri paketi kuruluyor ({_TRANSLATION_MODE_LABELS.get(mode, mode)})…"
+    )
+    try:
+        result = translation_pack.install_pack(
+            project_root,
+            Path(req.translation_path),
+            mode=mode,
+            language_labels=_LANGUAGE_LABELS,
+        )
+    except translation_pack.TranslationError as exc:
+        job.log(f"Hata: Çeviri paketi kurulamadı.\n{exc}")
+        return False
+    except Exception as exc:  # noqa: BLE001
+        job.log(f"Hata: Çeviri paketi kurulurken beklenmeyen bir sorun: {exc!r}")
+        return False
+
+    job.log(f"  - diller           : {', '.join(result.languages)}")
+    job.log(f"  - kopyalanan dosya : {result.copied_files}")
+
+    for name in result.skipped_loaders:
+        job.log(
+            f'  - "{name}" ALINMADI: bu betik JSON\'u düz open() ile okuyor, '
+            "bu da Android'de çalışmaz (orada oyun verisi Ren'Py'nin varlık "
+            "katmanından okunur) ve hatayı sessizce yutuyor. Yerine aynı işi "
+            "doğru yapan bir betik üretildi."
+        )
+
+    for language, dropped in sorted(result.dropped_dialogue.items()):
+        if dropped:
+            job.log(
+                f"  - {language}: {dropped:,} diyalog kaydı zaten "
+                "`translate ... strings:` bloklarıyla karşılanıyor, JSON'a "
+                "gerek kalmadı (APK gereksiz yere büyümüyor)."
+            )
+    for language, extra in sorted(result.extra_dialogue.items()):
+        job.log(
+            f"  - {language}: {extra:,} diyalog string bloklarında yok, "
+            "bunlar için yedek bir filtre eklendi."
+        )
+
+    if result.hook_label:
+        job.log(
+            f"  - dil seçimi `{result.hook_label}` etiketine bağlandı "
+            "(oyunda tanımlı olmadığı doğrulandı)."
+        )
+    if result.forced_language:
+        job.log(f'  - oyun doğrudan "{result.forced_language}" dilinde açılacak.')
+    for note in result.notes:
+        job.log(f"  - UYARI: {note}")
+
+    return True
 
 
 def run_build(job: BuildJob, req: BuildRequest) -> None:
@@ -1136,7 +1228,8 @@ def run_build(job: BuildJob, req: BuildRequest) -> None:
             job.status = "error"
         shutil.rmtree(job_dir, ignore_errors=True)
         for temp_input in (
-            req.zip_path, req.icon_path, req.banner_path, req.keystore_path
+            req.zip_path, req.icon_path, req.banner_path,
+            req.translation_path, req.keystore_path,
         ):
             if temp_input is not None:
                 try:
@@ -1228,6 +1321,12 @@ def _execute_build(
     py_import_msg = _scan_local_py_imports(project_root)
     if py_import_msg:
         job.log(py_import_msg)
+
+    # --- Çeviri paketi ---------------------------------------------------
+    if req.translation_path is not None:
+        if not _install_translation(job, project_root, req):
+            job.status = "error"
+            return
 
     # --- Ren'Py sürümü ---------------------------------------------------
     if req.renpy_version != DEFAULT_RENPY_VERSION:
@@ -1554,6 +1653,7 @@ async def api_build(
     project_zip: UploadFile = File(...),
     icon: Optional[UploadFile] = File(None),
     banner: Optional[UploadFile] = File(None),
+    translation: Optional[UploadFile] = File(None),
     keystore: Optional[UploadFile] = File(None),
     renpy_version: str = Form(DEFAULT_RENPY_VERSION),
     want_apk: str = Form("true"),
@@ -1573,6 +1673,7 @@ async def api_build(
     aerokey_profile: str = Form("false"),
     aerokey_bug_report: str = Form("false"),
     aerokey_notifications: str = Form("false"),
+    translation_mode: str = Form("ask"),
 ) -> JSONResponse:
     version = (renpy_version or "").strip() or DEFAULT_RENPY_VERSION
     if not VERSION_RE.match(version):
@@ -1594,12 +1695,14 @@ async def api_build(
 
     icon_path = await _save_upload(icon, ".img")
     banner_path = await _save_upload(banner, ".gif")
+    translation_path = await _save_upload(translation, ".zip")
     keystore_path = await _save_upload(keystore, ".keystore")
 
     request = BuildRequest(
         zip_path=zip_path,
         icon_path=icon_path,
         banner_path=banner_path,
+        translation_path=translation_path,
         keystore_path=keystore_path,
         renpy_version=version,
         want_apk=apk,
@@ -1619,6 +1722,7 @@ async def api_build(
         aerokey_profile=_bool_form(aerokey_profile),
         aerokey_bug_report=_bool_form(aerokey_bug_report),
         aerokey_notifications=_bool_form(aerokey_notifications),
+        translation_mode=(translation_mode or "ask").strip() or "ask",
     )
 
     job = _register_job()

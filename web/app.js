@@ -334,6 +334,7 @@
 
     if ($("icon").files[0]) data.append("icon", $("icon").files[0]);
     if ($("banner").files[0]) data.append("banner", $("banner").files[0]);
+    if ($("translation").files[0]) data.append("translation", $("translation").files[0]);
     if ($("keystore").files[0]) data.append("keystore", $("keystore").files[0]);
 
     const textFields = [
@@ -341,6 +342,7 @@
       "manual_name", "manual_package", "manual_version",
       "keystore_alias", "keystore_password",
       "aerokey_base_url", "aerokey_key_page", "aerokey_game_id",
+      "translation_mode",
     ];
     textFields.forEach((id) => data.append(id, $(id).value));
 

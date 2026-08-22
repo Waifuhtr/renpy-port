@@ -35,6 +35,7 @@ açık kaynak **renkit** aracını (`renutil` + `renconstruct`) otomatikleştiri
 | Gradle ön belleklemesi | 504 / indirme hatalarını baştan engeller |
 | **Ücretsiz erişim günleri** | Eklentiden tarih verin, o gün anahtar sorulmaz |
 | **Duyuru bildirimleri** | Eklentiden gönderin, oyuncunun bildirim çekmecesine düşsün |
+| **Çeviri paketi kurulumu** | Çeviri ZIP'ini ekler ve dili gerçekten seçilebilir yapar |
 | Canlı günlük | Server-Sent Events ile anlık akan derleme çıktısı |
 
 ---
@@ -59,6 +60,7 @@ açık kaynak **renkit** aracını (`renutil` + `renconstruct`) otomatikleştiri
    aerokey/__init__.py
    aerokey/patch_rapt.py
    aerokey/kotlin/*.kt        (9 dosya)
+   aerokey/translation.py
    ```
 
 4. **Settings → Variables and secrets** kısmından isterseniz şunları
@@ -133,6 +135,65 @@ Bu araç böyle paketleri **paketleyebilir**. Yaptıkları:
 derlenir; boş bırakırsanız araç klasör adından tahmin eder.
 
 > Elinizde ham kaynak varsa onu yüklemek her zaman daha iyidir.
+
+---
+
+## 🌍 Çeviri paketi
+
+Çeviri aracınızın ürettiği ZIP'i arayüzdeki **"Çeviri paketi"** bölümünden
+olduğu gibi yükleyin — içinden hiçbir şey silmenize gerek yok.
+
+### Sorun neydi?
+
+Çeviri dosyalarını `game/` içine kopyalamak **tek başına yetmiyor**, çünkü:
+
+1. `translate <dil> strings:` blokları yalnızca oyunun dili o dile
+   **ayarlandığında** devreye girer. Derlenmiş (`.rpyc`) bir oyunun
+   ekranlarına dil seçici ekleyemezsiniz, dolayısıyla dili ayarlayacak
+   hiçbir şey olmaz ve çeviri hiç görünmez. Dosyalar `.rpyc`'ye derlenir
+   ama hiçbir işe yaramaz — gördüğünüz davranış tam olarak buydu.
+2. Üretilen yükleyici betikler JSON eşlemesini düz
+   `open(config.gamedir + ...)` ile okur. Bu PC'de çalışır, **Android'de
+   çalışmaz**: orada oyun verisi Ren'Py'nin varlık/arşiv katmanından
+   okunur. Üstelik hata `except Exception` ile yutulduğu için ortada
+   hiçbir uyarı da çıkmaz.
+
+Bu bölüm ikisini de çözer.
+
+### Ne yapıyor?
+
+- `tl/<dil>/` klasörünü ve çeviri betiklerini `game/` içine yerleştirir.
+- Kurulum talimatı dosyalarını (`*.txt`, `*.md`) oyuna sokmaz.
+- **Kırık yükleyiciyi almaz**, yerine `renpy.file()` kullanan (yani
+  Android'de de çalışan) ve dili dikkate alan bir sürüm üretir.
+- **Gereksiz JSON'u atar.** Ren'Py belgelerine göre string çevirileri
+  "diyalog olarak çevrilmemiş diyalog metinlerine de uygulanır" — yani
+  derlenmiş bir oyunda `translate ... strings:` blokları diyaloğu da
+  çevirir. Araç, JSON'daki hangi satırların zaten bu bloklarla
+  karşılandığını hesaplar ve yalnızca **karşılanmayanlar** için yedek bir
+  filtre üretir. Örnek bir pakette 14.684 kaydın tamamı karşılandığı için
+  1,7 MB'lık JSON hiç paketlenmedi.
+- Dilin seçilebilmesi için gereken kancayı ekler (aşağıya bakın).
+
+### Dil davranışı
+
+| Mod | Ne olur |
+|---|---|
+| **Açılışta dil sor** (önerilen) | Ana menüden önce bir kez "Dil / Language" ekranı çıkar; seçim kalıcı saklanır |
+| **Her zaman çeviri dilinde aç** | `config.language` ile oyun doğrudan o dile açılır |
+| **Sadece dosyaları ekle** | Dile hiç dokunulmaz (oyunun kendi ayarlar ekranında zaten seçici varsa) |
+
+**Dil sorma kancası neden `splashscreen`?** `config.overlay_screens` ana
+menüde gizlenir (Ren'Py belgeleri), oradan sorulamaz. Belgelenmiş
+`splashscreen` etiketi ise "oyun ilk çalıştırıldığında, ana menü
+gösterilmeden önce" çağrılır — tam aradığımız yer.
+
+Tek risk, oyunun o etiketi zaten tanımlamış olması: Ren'Py'de aynı etiketi
+iki kez tanımlamak oyunu **açılmaz** hale getirir. Bu yüzden araç, derleme
+anında oyunun `.rpy` **ve `.rpyc`** dosyalarını (RPYC2 dilimlerini açarak)
+tarayıp etiketin boş olduğunu doğrular. Doğrulayamazsa dili sormak yerine
+doğrudan uygular ve günlükte bunu açıkça yazar — yani en kötü durumda
+çeviri yine çalışır, oyun asla bozulmaz.
 
 ---
 
