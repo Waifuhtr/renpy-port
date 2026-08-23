@@ -858,22 +858,95 @@ def _looks_like_network_failure(log_text: str) -> Optional[str]:
 _registry_lock = threading.Lock()
 
 
-def _load_registry() -> dict:
+_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+
+
+def _quarantine_corrupt_registry(raw: str) -> None:
+    """
+    Onarılamayan kaydı SİLMEK yerine yanına yedekler.
+
+    Bu kayıt "bir kimlik asla yeniden verilmesin" garantisinin tek
+    kaynağıdır. Onu sessizce boşaltıp üzerine yazmak, önceden atanmış
+    kimlikleri unutup yeniden dağıtmak demektir — üstelik oyuncuların
+    oynama süresi de kimliğe göre tutulduğu için kayıtlar karışır. Bozuk
+    dosyayı sakladığımızda en azından elle kurtarılabilir.
+    """
     try:
-        data = json.loads(GAME_ID_REGISTRY.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            data.setdefault("assignments", {})
-            data.setdefault("used", [])
-            return data
-    except (OSError, ValueError):
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup = GAME_ID_REGISTRY.with_name(f"game_ids.json.corrupt-{stamp}")
+        backup.write_text(raw, encoding="utf-8")
+        print(
+            f"[oyun_kimligi] UYARI: {GAME_ID_REGISTRY} okunamadı, boş kayıtla "
+            f"başlanıyor. Bozuk içerik {backup} olarak yedeklendi.",
+            file=sys.stderr,
+        )
+    except OSError:
         pass
+
+
+def _load_registry() -> dict:
+    """
+    Oyun kimliği kaydını okur.
+
+    Bir JSON söz dizimi hatasında hemen pes ETMİYORUZ: elle düzenlerken en
+    sık yapılan hata — dizi/nesnenin son öğesinden sonra fazladan virgül
+    bırakmak — otomatik onarılıp dosyaya doğru biçimde geri yazılır. Bu da
+    başarısız olursa dosya YOK SAYILMAZ, yedeklenir (bkz.
+    _quarantine_corrupt_registry) ki veri sessizce kaybolmasın.
+    """
+    if not GAME_ID_REGISTRY.is_file():
+        return {"assignments": {}, "used": []}
+
+    try:
+        raw = GAME_ID_REGISTRY.read_text(encoding="utf-8")
+    except OSError:
+        return {"assignments": {}, "used": []}
+
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        repaired = _TRAILING_COMMA_RE.sub(r"\1", raw)
+        try:
+            data = json.loads(repaired)
+        except ValueError:
+            _quarantine_corrupt_registry(raw)
+            return {"assignments": {}, "used": []}
+        else:
+            if isinstance(data, dict):
+                data.setdefault("assignments", {})
+                data.setdefault("used", [])
+                # Onarılmış biçimi kalıcı olarak geri yaz; aksi halde bir
+                # sonraki okuma aynı onarımı sessizce tekrarlar.
+                _save_registry(data)
+                return data
+            _quarantine_corrupt_registry(raw)
+            return {"assignments": {}, "used": []}
+
+    if isinstance(data, dict):
+        data.setdefault("assignments", {})
+        data.setdefault("used", [])
+        return data
+
+    _quarantine_corrupt_registry(raw)
     return {"assignments": {}, "used": []}
 
 
 def _save_registry(data: dict) -> None:
+    """
+    Kaydı diske yazar.
+
+    Yazma İŞLEM OLARAK ATOMİKTİR: önce geçici bir dosyaya yazılır, sonra
+    `os.replace` ile hedefin üzerine taşınır. HF Space'in yazma sırasında
+    yeniden başlaması (OOM, yeniden dağıtım) gibi durumlarda düz bir
+    `write_text` yarım kalmış/bozuk bir dosya bırakabilirdi; `os.replace`
+    tek bir dosya sistemi işlemi olduğu için ya eski içerik ya da tam yeni
+    içerik kalır, asla ikisinin karışımı kalmaz.
+    """
     try:
         GAME_ID_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-        GAME_ID_REGISTRY.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp = GAME_ID_REGISTRY.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, GAME_ID_REGISTRY)
     except OSError:
         pass
 
