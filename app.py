@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
+import hashlib
 import json
 import os
 import re
@@ -43,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # `translation` adlı bir dosya parametresi var ve modülü gölgelerdi.
 from aerokey import patch_rapt  # noqa: E402  (yol ayarından sonra gelmeli)
 from aerokey import translation as translation_pack  # noqa: E402
+from aerokey import rpa as rpa_archive  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
@@ -60,39 +63,49 @@ WORK_ROOT.mkdir(parents=True, exist_ok=True)
 RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
 
 
-def _resolve_data_dir() -> Path:
+def _resolve_data_dir() -> tuple[Path, bool]:
     """
     Derlemeler arasında KALICI olması gereken veriler (imza anahtarı, oyun
     kimliği kaydı) için yazılabilir bir dizin seçer.
 
-    Hugging Face Space'lerinde kalıcı disk etkinse /data yazılabilir olur ve
-    Space yeniden başlasa bile içeriği korunur. Değilse geçici bir dizine
-    düşeriz — bu durumda Space her yeniden başladığında imza anahtarı
-    değişir, bu yüzden anahtarı indirip saklamak önemlidir (arayüzde
-    açıkça uyarıyoruz).
+    Döner: (dizin, gerçekten_kalıcı_mı)
+
+    KRİTİK: "yazılabilir" ile "kalıcı" aynı şey DEĞİL. Hugging Face
+    Space'inde kalıcı disk yoksa /data yazılamaz ve ev dizinine düşeriz;
+    ev dizini yazılabilir ama Space her yeniden başladığında SIFIRLANIR.
+    Eski sürüm ikisini ayırmıyordu: ev dizinini "kalıcı" sayıp uyarıyı hiç
+    göstermiyordu. Sonuç: her yeniden başlatmada yeni imza anahtarı
+    üretiliyor, bu da her oyuna FARKLI bir cihaz kimliği veriyordu
+    (ANDROID_ID imza anahtarına bağlıdır) ve oyun kimliği kaydı da
+    sıfırlandığı için numaralar yeniden kullanılabiliyordu.
+
+    Yalnızca açıkça yapılandırılmış PORTER_DATA_DIR ve /data kalıcı sayılır.
     """
-    candidates = [os.environ.get("PORTER_DATA_DIR"), "/data", str(Path.home() / ".renpy_porter")]
-    for candidate in candidates:
-        if not candidate:
-            continue
+    explicit = os.environ.get("PORTER_DATA_DIR")
+    # (aday, kalıcı sayılır mı)
+    candidates: list[tuple[str, bool]] = []
+    if explicit:
+        candidates.append((explicit, True))
+    candidates.append(("/data", True))
+    candidates.append((str(Path.home() / ".renpy_porter"), False))
+
+    for candidate, persistent in candidates:
         path = Path(candidate)
         try:
             path.mkdir(parents=True, exist_ok=True)
             probe = path / ".write_test"
             probe.write_text("ok", encoding="utf-8")
             probe.unlink()
-            return path
+            return path, persistent
         except OSError:
             continue
+
     fallback = Path(tempfile.gettempdir()) / "renpy_porter_data"
     fallback.mkdir(parents=True, exist_ok=True)
-    return fallback
+    return fallback, False
 
 
-DATA_DIR = _resolve_data_dir()
-DATA_IS_PERSISTENT = str(DATA_DIR) not in (
-    str(Path(tempfile.gettempdir()) / "renpy_porter_data"),
-)
+DATA_DIR, DATA_IS_PERSISTENT = _resolve_data_dir()
 
 GAME_ID_PREFIX = os.environ.get("AEROKEY_GAME_ID_PREFIX", "riaslink_oyun_")
 GAME_ID_REGISTRY = DATA_DIR / "game_ids.json"
@@ -397,6 +410,64 @@ class ProjectIdentity:
     name_source: str
     package_source: str
     version_source: str
+
+
+def _extract_rpa_archives(job: BuildJob, project_root: Path) -> bool:
+    """
+    `game/` altındaki RPA arşivlerini açar.
+
+    Ren'Py arşivi çalışma anında kendisi okuyabilir, yani paketleme için
+    açmak şart değil. Bizim hattımız için ŞART, çünkü çeviri kurulumu
+    kanca etiketinin boş olduğunu `.rpyc` dosyalarını tarayarak
+    doğruluyor: dosyalar arşivin içindeyse tarayıcı hiçbir şey göremez,
+    etiketi boş sanar ve aynı etiketi ikinci kez tanımlar — bu da oyunun
+    hiç açılmaması demektir.
+
+    Arşiv okunamazsa derlemeyi DURDURUYORUZ: yarım açılmış bir oyunla
+    devam etmek sessizce bozuk bir APK üretirdi.
+
+    Döner: devam edilebilir mi.
+    """
+    game_dir = project_root / "game"
+    archives = rpa_archive.find_archives(game_dir)
+    if not archives:
+        return True
+
+    job.log(
+        f"\nSıkıştırılmış oyun verisi bulundu ({len(archives)} arşiv). "
+        "Dosyalar açılıp yerine yerleştiriliyor…"
+    )
+
+    try:
+        results = rpa_archive.extract_all(game_dir, remove=True)
+    except rpa_archive.RpaError as exc:
+        job.log(
+            f"Hata: RPA arşivi açılamadı.\n{exc}\n"
+            "Arşiv bozuk ya da desteklenmeyen bir biçimde olabilir. "
+            "Oyunu arşivsiz (klasör hâlinde) yükleyip tekrar deneyin."
+        )
+        job.status = "error"
+        return False
+    except OSError as exc:
+        job.log(f"Hata: RPA arşivi açılırken disk hatası: {exc}")
+        job.status = "error"
+        return False
+
+    total = 0
+    for result in results:
+        total += result.files
+        detail = f"  - {result.archive.name}: {result.files} dosya"
+        if result.overwritten:
+            detail += f", {result.overwritten} tanesi zaten mevcut olduğu için atlandı"
+        if result.skipped:
+            detail += f", {len(result.skipped)} güvensiz ad atlandı"
+        job.log(detail)
+
+    job.log(
+        f"  Toplam {total} dosya açıldı; arşivler silindi "
+        "(aksi halde aynı veri APK'ya iki kez girerdi)."
+    )
+    return True
 
 
 def _resolve_identity(
@@ -919,18 +990,98 @@ def _run_keytool(keystore_path: Path, alias: str, password: str) -> subprocess.C
     )
 
 
+ENV_KEYSTORE_B64 = "AEROKEY_KEYSTORE_B64"
+ENV_KEYSTORE_ALIAS = "AEROKEY_KEYSTORE_ALIAS"
+ENV_KEYSTORE_PASSWORD = "AEROKEY_KEYSTORE_PASSWORD"
+
+
+def keystore_fingerprint(path: Path, alias: str, password: str) -> str:
+    """
+    Anahtarın SHA-256 parmak izi.
+
+    Buna ihtiyaç var çünkü cihaz kimliği (ANDROID_ID) imza anahtarına
+    bağlı: anahtar sessizce değişirse tüm oyuncuların kimliği sıfırlanır.
+    Parmak izini her derleme günlüğüne yazarak bu değişimi GÖRÜNÜR
+    kılıyoruz — iki derlemede farklıysa sebebi hemen anlaşılır.
+    """
+    try:
+        result = subprocess.run(
+            ["keytool", "-list", "-v",
+             "-keystore", str(path), "-alias", alias, "-storepass", password],
+            capture_output=True, text=True, timeout=60,
+        )
+        for line in (result.stdout or "").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("SHA256:"):
+                return stripped.split("SHA256:", 1)[1].strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    # keytool bir sebeple konuşmazsa dosyanın özetine düşeriz; yine de
+    # "değişti mi" sorusunu yanıtlar.
+    try:
+        return "dosya-sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()[:32]
+    except OSError:
+        return "bilinmiyor"
+
+
+def _keystore_from_env() -> Optional[tuple[Path, str, str]]:
+    """
+    Anahtarı ortam değişkeninden (HF Space Secret) yükler.
+
+    Kalıcı disk olmayan Space'lerde TEK güvenilir yol budur: kalıcı disk
+    yoksa dosya sistemine yazılan anahtar her yeniden başlatmada kaybolur
+    ve yeniden üretilir. Secret ise Space'in kendisinde durur, yeniden
+    başlatmadan etkilenmez.
+    """
+    raw = os.environ.get(ENV_KEYSTORE_B64, "").strip()
+    if not raw:
+        return None
+
+    alias = os.environ.get(ENV_KEYSTORE_ALIAS, "").strip()
+    password = os.environ.get(ENV_KEYSTORE_PASSWORD, "").strip()
+    if not alias or not password:
+        raise RuntimeError(
+            f"{ENV_KEYSTORE_B64} tanımlı ama {ENV_KEYSTORE_ALIAS} ve/veya "
+            f"{ENV_KEYSTORE_PASSWORD} eksik. Üçünü birlikte tanımlayın."
+        )
+
+    try:
+        blob = base64.b64decode(raw, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise RuntimeError(
+            f"{ENV_KEYSTORE_B64} geçerli bir base64 değeri değil: {exc}"
+        ) from exc
+
+    if not blob:
+        raise RuntimeError(f"{ENV_KEYSTORE_B64} boş çözümlendi.")
+
+    SIGNING_DIR.mkdir(parents=True, exist_ok=True)
+    target = SIGNING_DIR / "env.keystore"
+    target.write_bytes(blob)
+    return target, alias, password
+
+
 def get_or_create_auto_keystore() -> tuple[Path, str, str, bool]:
     """
     Otomatik imzalama anahtarını döner; yoksa bir kez üretip saklar.
 
-    Kritik nokta: bu anahtar KALICIDIR. Eski sürümde her derlemede rastgele
-    bir anahtar üretiliyordu ve bu, arka arkaya alınan iki APK'nin
-    birbirinin üzerine kurulamaması demekti. Artık aynı anahtar tekrar
-    kullanıldığı için güncellemeler sorunsuz kurulur.
+    Kritik nokta: bu anahtar KALICI OLMALI. Anahtar değişirse yalnızca
+    "APK'ler birbirinin üzerine kurulmaz" olmakla kalmaz — Android'in
+    ANDROID_ID değeri imza anahtarına bağlı olduğu için TÜM oyuncuların
+    cihaz kimliği ve dolayısıyla profili sıfırlanır.
+
+    Öncelik sırası:
+      1. Ortam değişkeni (HF Space Secret) — yeniden başlatmadan etkilenmez
+      2. Kalıcı diskteki dosya
+      3. Yeni üretim
 
     Döner: (yol, alias, şifre, yeni_mi_üretildi)
     """
     with _keystore_lock:
+        from_env = _keystore_from_env()
+        if from_env is not None:
+            return from_env[0], from_env[1], from_env[2], False
+
         SIGNING_DIR.mkdir(parents=True, exist_ok=True)
 
         if AUTO_KEYSTORE.is_file() and AUTO_KEYSTORE_META.is_file():
@@ -1284,6 +1435,12 @@ def _execute_build(
         if cleanup_msg:
             job.log(cleanup_msg)
 
+    # --- Sıkıştırılmış oyun verisi ---------------------------------------
+    # Kimlik çözümlemesinden ÖNCE açıyoruz: options.rpy arşivin içindeyse
+    # açtıktan sonra okunabilir hale gelir.
+    if not _extract_rpa_archives(job, project_root):
+        return
+
     # --- Kimlik ----------------------------------------------------------
     identity = _resolve_identity(
         project_root,
@@ -1419,21 +1576,37 @@ def _execute_build(
             job.status = "error"
             return
 
-        if created:
+        from_secret = bool(os.environ.get(ENV_KEYSTORE_B64, "").strip())
+        if from_secret:
             job.log(
-                "\nİmzalama: kalıcı otomatik imza anahtarı ilk kez üretildi ve "
-                "saklandı. Bundan sonraki tüm derlemeler aynı anahtarla "
-                "imzalanacak, yani ürettiğiniz APK'ler birbirinin üzerine "
-                "sorunsuz kurulur."
+                "\nİmzalama: anahtar Space Secret'ından (" + ENV_KEYSTORE_B64 +
+                ") okundu. Bu anahtar yeniden başlatmalardan etkilenmez."
+            )
+        elif created:
+            job.log(
+                "\nİmzalama: otomatik imza anahtarı ilk kez üretildi ve saklandı."
             )
         else:
-            job.log("\nİmzalama: saklı otomatik imza anahtarı kullanılıyor (her derlemede aynı).")
+            job.log("\nİmzalama: saklı otomatik imza anahtarı kullanılıyor.")
 
-        if not DATA_IS_PERSISTENT:
+        # Parmak izini HER derlemede yazıyoruz. Cihaz kimliği (ANDROID_ID)
+        # imza anahtarına bağlı olduğu için, bu satır iki derleme arasında
+        # değiştiyse oyuncuların profili de sıfırlanmış demektir.
+        job.log(f"  anahtar parmak izi (SHA-256): {keystore_fingerprint(ks_path, alias_final, password_final)}")
+        job.log(
+            "  Bu satır derlemeler arasında AYNI kalmalı; değişirse tüm "
+            "oyuncuların cihaz kimliği ve profili sıfırlanır."
+        )
+
+        if not from_secret and not DATA_IS_PERSISTENT:
             job.log(
-                "  UYARI: Kalıcı disk bulunamadığı için bu anahtar Space "
-                "yeniden başlatılınca kaybolur. 'Anahtarı indir' düğmesiyle "
-                "yedekleyin ya da Space ayarlarından kalıcı disk açın."
+                "\n  !!! KRİTİK: Kalıcı disk YOK. Bu anahtar Space yeniden\n"
+                "  başlatılınca kaybolur ve yenisi üretilir. Yeni anahtar =\n"
+                "  yeni cihaz kimliği = tüm oyuncuların profili sıfırlanır.\n"
+                "  Çözüm: 'Anahtarı indir' ile indirin, base64'e çevirip\n"
+                f"  Space ayarlarında {ENV_KEYSTORE_B64} secret'ı olarak\n"
+                f"  kaydedin ({ENV_KEYSTORE_ALIAS} ve {ENV_KEYSTORE_PASSWORD}\n"
+                "  ile birlikte). Ayrıntı için README'ye bakın."
             )
 
     with open(ks_path, "rb") as f:
@@ -1604,6 +1777,40 @@ async def api_config() -> JSONResponse:
             "suggested_game_id": peek_next_game_id()["game_id"],
             "persistent_storage": DATA_IS_PERSISTENT,
             "auto_keystore_exists": AUTO_KEYSTORE.is_file(),
+            "keystore_from_secret": bool(os.environ.get(ENV_KEYSTORE_B64, "").strip()),
+        }
+    )
+
+
+@app.get("/api/keystore/auto/secret")
+async def api_auto_keystore_secret() -> JSONResponse:
+    """
+    Anahtarı, Space Secret'ı olarak yapıştırılmaya hazır biçimde döner.
+
+    Kalıcı disk olmayan Space'lerde anahtarı sabit tutmanın tek yolu bu:
+    dosya sistemine yazılan anahtar her yeniden başlatmada kaybolur ve
+    yeniden üretilir. Anahtar değişince ANDROID_ID de değiştiği için tüm
+    oyuncuların profili sıfırlanır.
+    """
+    try:
+        path, alias, password, _ = get_or_create_auto_keystore()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    try:
+        blob = path.read_bytes()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Anahtar okunamadı: {exc}") from exc
+
+    return JSONResponse(
+        {
+            "active": bool(os.environ.get(ENV_KEYSTORE_B64, "").strip()),
+            "fingerprint": keystore_fingerprint(path, alias, password),
+            "secrets": {
+                ENV_KEYSTORE_B64: base64.b64encode(blob).decode("ascii"),
+                ENV_KEYSTORE_ALIAS: alias,
+                ENV_KEYSTORE_PASSWORD: password,
+            },
         }
     )
 

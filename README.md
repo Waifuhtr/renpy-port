@@ -28,7 +28,8 @@ açık kaynak **renkit** aracını (`renutil` + `renconstruct`) otomatikleştiri
 |---|---|
 | APK / AAB üretimi | Resmi RAPT + Gradle hattı üzerinden |
 | **Derlenmiş proje desteği** | `Build Distributions` çıktısını da (sadece `.rpyc`) paketleyebilir |
-| **Otomatik imzalama** | Kalıcı anahtar bir kez üretilir, her derlemede aynısı kullanılır |
+| **Otomatik imzalama** | Kalıcı anahtar bir kez üretilir, her derlemede aynısı kullanılır (Space Secret ile de saklanabilir) |
+| **`archive.rpa` açma** | Sıkıştırılmış oyun verisi derleme sırasında otomatik açılır |
 | **AeroKey lisans ekranı** | Kotlin ile yazılmış, oyundan önce açılan native giriş ekranı |
 | **Oyun süresi sayımı** | Oynanan süre sunucuya senkronlanır (Steam tarzı) |
 | **Bulut profili** | Ad + avatar cihaz kimliğine bağlanır: silip kursan da, başka oyununu kursan da seni tanır |
@@ -265,9 +266,12 @@ için (bkz. [İmzalama](#-i̇mzalama)), aynı cihazdaki tüm oyunların cihaz
 kimliği aynıdır ve silme/kurma bunu bozmaz.
 
 > ⚠️ **Bunun tek koşulu:** oyunların aynı anahtarla imzalanması. Bir oyun
-> için kendi keystore'unu yüklersen o oyun farklı bir kimlik görür. Aynı
-> şekilde Space'in kalıcı diski silinirse anahtar yeniden üretilir ve
-> **tüm** kimlikler sıfırlanır — kalıcı disk bu yüzden önemli.
+> için kendi keystore'unu yüklersen o oyun farklı bir kimlik görür.
+>
+> **En sık karşılaşılan sorun bu:** Space'in kalıcı diski yoksa anahtar her
+> yeniden başlatmada yeniden üretilir ve her derleme farklı bir cihaz
+> kimliği verir. Çözümü ve anahtarın parmak izini nasıl doğrulayacağınız
+> [İmzalama](#-i̇mzalama) bölümünde.
 
 #### 🖼️ Profil görselleri (avatar)
 
@@ -428,15 +432,93 @@ JSON için `org.json`, arayüz için programatik Android View'ları kullanır
 
 **Hiçbir şey yapmanıza gerek yok.** İlk derlemede kalıcı bir imza anahtarı
 üretilir ve saklanır; sonraki **tüm** derlemeler aynı anahtarla imzalanır.
-Böylece ürettiğiniz APK'ler birbirinin üzerine sorunsuz kurulur ve Play
-Store güncellemeleri çalışır.
+
+### ⚠️ Anahtar neden bu kadar kritik?
+
+İmza anahtarı yalnızca "APK'ler birbirinin üzerine kurulsun" meselesi
+değil. Android'in `ANDROID_ID` değeri **imza anahtarına bağlıdır**. Anahtar
+değişirse:
+
+- her oyun **farklı bir cihaz kimliği** görür,
+- **tüm oyuncuların profili** (sıralama adı, avatar, süreler) sıfırlanır,
+- daha önce yayınladığınız APK'ler bir daha güncellenemez.
+
+Her derlemenin günlüğünde anahtarın **SHA-256 parmak izi** yazılır. Bu satır
+derlemeler arasında **aynı kalmalıdır**; değiştiyse yukarıdakiler olmuş
+demektir.
+
+### Anahtarı kalıcı kılmanın iki yolu
+
+**1. Kalıcı disk (en kolay).** Space ayarlarından kalıcı disk açın. Anahtar
+`/data` altında saklanır ve yeniden başlatmalardan etkilenmez.
+
+**2. Space Secret (kalıcı disk yoksa TEK güvenilir yol).** Kalıcı disk yoksa
+anahtar ev dizinine yazılır ve Space her yeniden başladığında **silinir** —
+yenisi üretilir, kimlikler sıfırlanır. Bunu önlemek için:
+
+1. `/api/keystore/auto/secret` adresini açın (ya da "Anahtarı indir" ile
+   dosyayı alıp kendiniz base64'e çevirin).
+2. Space → **Settings → Variables and secrets** bölümüne üç secret ekleyin:
+
+   | Secret | Değer |
+   |---|---|
+   | `AEROKEY_KEYSTORE_B64` | anahtarın base64 hâli |
+   | `AEROKEY_KEYSTORE_ALIAS` | alias |
+   | `AEROKEY_KEYSTORE_PASSWORD` | şifre |
+
+3. Space'i yeniden başlatın. Artık anahtar Space'in kendisinde durur;
+   yeniden başlatmalar, imaj yeniden derlemeleri hiçbir şeyi değiştirmez.
+
+Secret tanımlıysa derleme günlüğü bunu açıkça yazar ve dosyadaki anahtar
+yok sayılır.
+
+> Üç secret'ın **üçü birden** tanımlı olmalı. Yalnızca biri eksikse derleme
+> net bir hatayla durur — sessizce başka bir anahtara düşmez.
 
 - **Yedekleyin:** "Anahtarı indir (yedekle)" düğmesiyle `.keystore`
   dosyasını, "Alias / şifreyi göster" ile de kimlik bilgilerini alın.
-  Kaybederseniz geri getirilemez ve o uygulamayı bir daha güncelleyemezsiniz.
 - **Kendi anahtarınızı kullanmak isterseniz:** "İkon ve imzalama →
   Bunun yerine kendi anahtarımı kullanmak istiyorum" bölümünden dosya +
   alias + şifre girin. Üçü de dolu değilse otomatik anahtar kullanılır.
+
+---
+
+## 📦 Sıkıştırılmış oyun verisi (`archive.rpa`)
+
+`Build Distributions` çıktısı oyun dosyalarını genelde tek bir
+`game/archive.rpa` içinde toplar. Paketleyici bu arşivleri **derleme
+sırasında otomatik açar**, dosyaları `game/` altına gerçek klasör yapısıyla
+yerleştirir ve arşivi siler.
+
+Sizin yapmanız gereken bir şey yok — ZIP'i olduğu gibi yükleyin.
+
+`archive.rpa` dışındaki adlar da (`images.rpa`, `scripts.rpa` …) bulunur ve
+açılır.
+
+### Neden açmak gerekiyor?
+
+Ren'Py arşivi çalışma anında kendisi okuyabilir, yani **paketleme için**
+açmak şart değil. Bizim hattımız için şart:
+
+Çeviri kurulumu, kanca etiketinin (`splashscreen` / `before_main_menu`)
+oyunda tanımlı **olmadığını** `.rpyc` dosyalarını tarayarak doğruluyor.
+Dosyalar arşivin içindeyse tarayıcı hiçbir şey göremez, etiketi "boş" sanır
+ve aynı etiketi ikinci kez tanımlar. Ren'Py'de bu, oyunun **hiç
+açılmaması** demektir.
+
+### Ayrıntılar
+
+- **Gevşek dosya kazanır.** `game/` altında zaten duran bir dosya, arşivdeki
+  kopyayla değiştirilmez — Ren'Py'nin çalışma anındaki davranışı da budur.
+- **Arşiv silinir.** Bırakılsaydı aynı veri APK'ya ikinci kez girerdi.
+- **Arşiv okunamazsa derleme durur.** Yarım açılmış bir oyunla devam etmek,
+  sessizce bozuk bir APK üretmek olurdu.
+- **Güvenlik:** arşiv dizini bir `pickle`'dır ve pickle çözmek tasarımı
+  gereği kod çalıştırabilir. Yalnızca temel veri kuruculara izin veren
+  kısıtlı bir çözücü kullanılıyor; `..` içeren ya da mutlak yol veren
+  girdiler hedef klasörün dışına yazamaz.
+- **Desteklenen biçimler:** RPA-2.0, RPA-3.0, RPA-3.2. RPA-1.0 (dizini ayrı
+  bir `.rpi` dosyasında tutan Ren'Py 6.x öncesi biçim) desteklenmiyor.
 
 ---
 
