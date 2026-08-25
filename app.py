@@ -46,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from aerokey import patch_rapt  # noqa: E402  (yol ayarından sonra gelmeli)
 from aerokey import translation as translation_pack  # noqa: E402
 from aerokey import rpa as rpa_archive  # noqa: E402
+from aerokey import display as virtual_display  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
@@ -106,6 +107,21 @@ def _resolve_data_dir() -> tuple[Path, bool]:
 
 
 DATA_DIR, DATA_IS_PERSISTENT = _resolve_data_dir()
+
+# --- Sanal ekran -------------------------------------------------------
+# Modül seviyesinde çağırıyoruz ki hem `python3 app.py` hem de
+# `uvicorn app:app` yolunda kurulsun. Derleme alt süreçleri os.environ'u
+# miras aldığı için DISPLAY'i burada ayarlamak yeterli.
+#
+# Ren'Py, APK üretmeden ÖNCE projeyi bir kez grafiksel olarak açıp kapatır
+# (build meta verisini toplamak için) ve bu adım atlanamaz. Ekran sunucusu
+# olmayan bir konteynerde bu adım segfault ile çöker; ayrıntılı gerekçe
+# aerokey/display.py başında.
+DISPLAY_INFO = virtual_display.ensure_virtual_display()
+if DISPLAY_INFO.active:
+    print(f"[ekran] Sanal ekran hazır: {DISPLAY_INFO.display} ({DISPLAY_INFO.note})")
+else:
+    print(f"[ekran] UYARI: sanal ekran kurulamadı. {DISPLAY_INFO.note}", file=sys.stderr)
 
 GAME_ID_PREFIX = os.environ.get("AEROKEY_GAME_ID_PREFIX", "riaslink_oyun_")
 GAME_ID_REGISTRY = DATA_DIR / "game_ids.json"
@@ -781,6 +797,47 @@ _TRACEBACK_BLOCK_RE = re.compile(
 )
 
 
+# Ren'Py Launcher'ın KENDİ dosyaları. Bir yığın izinin en alt satırı
+# bunlardan birine düşüyorsa hata kullanıcının oyununda değil, Launcher'ın
+# içindedir — "projenizin kodunda hata var" demek yanlış yönlendirme olur.
+_LAUNCHER_FILES = (
+    "game/interface.rpy",
+    "game/project.rpy",
+    "game/android.rpy",
+    "game/distribute.rpy",
+    "game/front_page.rpy",
+)
+
+# Ekransız (X sunucusuz) ortamda oluşan çökmenin imzaları.
+_HEADLESS_FAILURE_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"OpenGL support is either not configured in SDL",
+        r"SDL video driver \(dummy\)",
+        r"Could not get pygame screen",
+        r"Launch failed \(returned -11\)",
+        r"unable to open a display",
+        r"Could not initialize SDL",
+    )
+]
+
+
+def _looks_like_headless_failure(log: str) -> Optional[str]:
+    """
+    Çökme, ekran sunucusu olmamasından mı kaynaklanıyor?
+
+    Ren'Py APK üretmeden önce projeyi bir kez grafiksel olarak açar. Ekran
+    sunucusu yoksa SDL "dummy" sürücüsüne düşer, OpenGL bulunmadığı için
+    render başlatılamaz ve süreç segfault ile ölür. Bu, kullanıcının
+    oyunuyla ilgili DEĞİLDİR; ortam eksikliğidir.
+    """
+    for pattern in _HEADLESS_FAILURE_PATTERNS:
+        match = pattern.search(log)
+        if match:
+            return match.group(0)
+    return None
+
+
 def _find_likely_root_cause(full_log: str) -> Optional[str]:
     """
     Uzun bir derleme günlüğünde, jenerik kapanış hatasının arkasında gizli
@@ -804,12 +861,27 @@ def _find_likely_root_cause(full_log: str) -> Optional[str]:
     game_file_match = None
     for gm in re.finditer(r'File "([^"]+)", line (\d+)', body):
         path = gm.group(1)
-        if path.startswith("game/"):
+        if path.startswith("game/") and path not in _LAUNCHER_FILES:
             game_file_match = (path, gm.group(2))
 
     if game_file_match:
         return f"{exc_line.strip()}  (konum: {game_file_match[0]}:{game_file_match[1]})"
     return exc_line.strip()
+
+
+def _root_cause_is_user_project(full_log: str) -> bool:
+    """
+    Kök neden gerçekten kullanıcının projesinde mi?
+
+    Yığın izinin YALNIZCA Launcher dosyalarına düştüğü durumlarda hatayı
+    kullanıcının oyununa yıkmak yanlıştı: örneğin ekransız ortamdaki
+    çökmede Launcher kendi hata penceresini çizmeye çalışırken
+    `KeyError: \'bottom\'` veriyor ve konum `game/interface.rpy` oluyor.
+    """
+    for match in re.finditer(r'File "(game/[^"]+)", line \d+', full_log):
+        if match.group(1) not in _LAUNCHER_FILES:
+            return True
+    return False
 
 
 # Geçici ağ arızalarının imzaları. Bunlardan biri görülürse derlemeyi
@@ -1764,15 +1836,48 @@ def _execute_build(
                 "bir sorun olduğu anlamına gelmez — birkaç dakika sonra tekrar "
                 f"deneyin ({max_attempts} otomatik deneme zaten yapıldı)."
             )
+        elif _looks_like_headless_failure(full_log):
+            # Ekransız ortam çökmesi. Bunu "projenizde hata var" diye
+            # sunmak yanlış yönlendirme olurdu: günlükte görünen hata
+            # (genelde KeyError: 'bottom') asıl sebebin üstünü örten
+            # İKİNCİL bir çökmedir — Launcher, kendi hata penceresini
+            # çizemeyince o da çöker.
+            signature = _looks_like_headless_failure(full_log)
+            display_state = (
+                f"şu an aktif ({DISPLAY_INFO.display})"
+                if DISPLAY_INFO.active
+                else f"KURULAMADI — {DISPLAY_INFO.note}"
+            )
+            job.log(
+                f"\nDerleme HATA ile sonuçlandı (kod {return_code}).\n"
+                f"Sebep: EKRAN SUNUCUSU sorunu ({signature!r}).\n"
+                "Ren'Py, APK üretmeden önce projeyi bir kez grafiksel olarak "
+                "açıp kapatıyor (derleme meta verisini toplamak için) ve bu "
+                "adım atlanamıyor. Ekran sunucusu olmadan bu adım çöker.\n"
+                f"Sanal ekran durumu: {display_state}\n"
+                "Bu hata projenizin kodundan KAYNAKLANMIYOR. Docker imajında "
+                "'xvfb' ve 'libgl1-mesa-dri' paketlerinin kurulu olduğundan "
+                "emin olun ve Space'i yeniden derleyin."
+            )
         else:
             root_cause = _find_likely_root_cause(full_log)
-            hint = (
-                f"\nOlası kök neden (otomatik tespit, kesin teşhis değildir): "
-                f"{root_cause}\nBu genelde projenizin kendi başlangıç kodundaki "
-                "bir hatadan kaynaklanır.\n"
-                if root_cause
-                else ""
-            )
+            if root_cause and _root_cause_is_user_project(full_log):
+                hint = (
+                    f"\nOlası kök neden (otomatik tespit, kesin teşhis değildir): "
+                    f"{root_cause}\nBu genelde projenizin kendi başlangıç kodundaki "
+                    "bir hatadan kaynaklanır.\n"
+                )
+            elif root_cause:
+                # Yığın izi yalnızca Ren'Py Launcher'ın kendi dosyalarına
+                # düşüyor; suçu kullanıcının projesine yıkmıyoruz.
+                hint = (
+                    f"\nOlası kök neden (otomatik tespit, kesin teşhis değildir): "
+                    f"{root_cause}\nHata Ren'Py Launcher'ın kendi içinde oluştu; "
+                    "bu genelde asıl sebebin üstünü örten ikincil bir çökmedir. "
+                    "Günlüğün DAHA ÜST kısımlarına bakın.\n"
+                )
+            else:
+                hint = ""
             job.log(
                 f"\nDerleme HATA ile sonuçlandı (kod {return_code}).\n{hint}"
                 "Yukarıdaki günlüğü inceleyin; README'deki 'Sorun Giderme' "

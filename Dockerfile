@@ -37,9 +37,24 @@ COPY --from=eclipse-temurin:21-jdk $JAVA_HOME $JAVA_HOME
 ENV PATH="${JAVA_HOME}/bin:/root/.cargo/bin:${PATH}"
 
 # --- Sistem bağımlılıkları ----------------------------------------------
+# xvfb + libgl1-mesa-dri NEDEN GEREKLİ:
+# renconstruct, APK üretmeden ÖNCE Ren'Py Launcher'ı çağırır; Launcher da
+# projenin derleme meta verisini toplamak için oyunu bir kez GERÇEKTEN
+# açıp hemen kapatır (`renpy.py <proje> quit --json-dump`). Bu çağrı
+# Launcher'ın kaynağında koşulsuzdur, atlanamaz.
+#
+# Ekran sunucusu olmayan bir konteynerde SDL "dummy" video sürücüsüne
+# düşer; bu sürücünün OpenGL'i olmadığı için gl2/gles2 başarısız olur,
+# yazılım render'ına düşülür ve orada segfault gelir ("returned -11").
+# Ardından Launcher kendi hata penceresini çizmeye çalışırken o da çöker
+# (KeyError: 'bottom') — yani görünen hata, asıl sebebin üstünü örter.
+#
+#   xvfb            : bellekte çalışan sanal ekran (hiçbir şey çizmez)
+#   libgl1-mesa-dri : GPU'suz ortamda yazılımsal OpenGL (llvmpipe)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl wget xz-utils libgl1 ca-certificates locales \
+        xvfb libgl1-mesa-dri \
         python3 python3-pip && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 

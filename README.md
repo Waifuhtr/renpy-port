@@ -36,6 +36,7 @@ açık kaynak **renkit** aracını (`renutil` + `renconstruct`) otomatikleştiri
 | **Profil görselleri** | `aerokey/avatars/` klasörüne GIF koy; seçerken yalnızca seçili olan oynar |
 | Otomatik ikon | Tek kare görselden iki katmanlı adaptif ikon üretir |
 | Gradle ön belleklemesi | 504 / indirme hatalarını baştan engeller |
+| **Ekransız derleme** | Sanal ekran (Xvfb) otomatik başlar; Ren'Py'nin zorunlu grafiksel açılış adımı çökmez |
 | **Ücretsiz erişim günleri** | Eklentiden tarih verin, o gün anahtar sorulmaz |
 | **Duyuru bildirimleri** | Eklentiden gönderin, oyuncunun bildirim çekmecesine düşsün |
 | **Çeviri paketi kurulumu** | Çeviri ZIP'ini ekler ve dili gerçekten seçilebilir yapar |
@@ -601,6 +602,51 @@ denetim gerekli.
 | Lisans ekranı APK'de yok | Günlükte "giriş ekranı Android projesine yerleştirildi" satırını arayın. Yoksa AeroKey anahtarı kapalıdır ya da yama uygulanamamıştır (imaj derleme günlüğüne bakın). |
 | APK eskinin üzerine kurulmuyor | Kalıcı disk kapalıysa imza anahtarı değişmiştir. Kalıcı diski açın ya da yedeklediğiniz anahtarı elle yükleyin. |
 | Java/Gradle sürüm uyuşmazlığı | Ren'Py sürümünüze göre Dockerfile'daki JDK sürümünü (8 ↔ 21) güncelleyin. |
+| `Launch failed (returned -11)` / `KeyError: 'bottom'` / `SDL video driver (dummy)` | **Ekran sunucusu yok.** Aşağıya bakın. |
+
+### `Launch failed (returned -11)` — ekran sunucusu sorunu
+
+Belirtiler şöyle görünür:
+
+```
+Could not get pygame screen: error('OpenGL support is either not configured
+in SDL or not available in current SDL video driver (dummy) or platform')
+Launch failed (returned -11).
+...
+KeyError: 'bottom'
+```
+
+**Bu hata projenizin kodundan kaynaklanmaz.** Ren'Py, APK üretmeden önce
+projeyi bir kez **grafiksel olarak açıp** kapatır — derleme meta verisini
+(`build` sözlüğü, Google Play anahtarları) toplamak için. Bu çağrı Ren'Py
+Launcher'ın kaynağında koşulsuzdur, atlanamaz.
+
+Ekran sunucusu olmayan bir konteynerde SDL "dummy" video sürücüsüne düşer.
+Bu sürücünün OpenGL desteği hiç yoktur; `gl2` ve `gles2` sırayla başarısız
+olur, yazılım render'ına düşülür ve orada segfault gelir (`-11` = sinyal 11).
+
+`KeyError: 'bottom'` **asıl sebep değildir:** alt süreç çökünce Launcher
+kendi "Launching the project failed" penceresini çizmeye çalışır, ama komut
+satırı kipinde ekran katmanları hiç kurulmadığı için o da çöker. Yani
+görünen hata, asıl sebebin üstünü örten **ikincil** bir çökmedir.
+
+**Çözüm:** Docker imajında `xvfb` ve `libgl1-mesa-dri` paketleri kurulu
+olmalı (güncel Dockerfile'da var). Uygulama açılışta bellekte çalışan bir
+sanal ekran başlatır ve `DISPLAY` değişkenini ona yöneltir. Space
+günlüğünde şu satırı görmelisiniz:
+
+```
+[ekran] Sanal ekran hazır: :99 (Xvfb başlatıldı (1280x1024x24))
+```
+
+Bunun yerine `[ekran] UYARI:` görüyorsanız Space'i yeniden derleyin —
+imajınız `xvfb` paketinden önceki bir sürümdür.
+
+> **Performans:** Xvfb hiçbir şeyi fiziksel olarak çizmez, yalnızca bellekte
+> bir kare tamponu tutar. Konteyner başına **bir kez** başlatılır, her
+> derlemede değil. Söz konusu adım oyunu yalnızca açıp kapattığı için ek
+> yük saniyeler mertebesindedir ve dakikalar süren Gradle aşamasının
+> yanında ihmal edilebilir.
 
 ---
 
