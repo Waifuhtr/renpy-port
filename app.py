@@ -1850,14 +1850,21 @@ def _execute_build(
             )
             job.log(
                 f"\nDerleme HATA ile sonuçlandı (kod {return_code}).\n"
-                f"Sebep: EKRAN SUNUCUSU sorunu ({signature!r}).\n"
-                "Ren'Py, APK üretmeden önce projeyi bir kez grafiksel olarak "
-                "açıp kapatıyor (derleme meta verisini toplamak için) ve bu "
-                "adım atlanamıyor. Ekran sunucusu olmadan bu adım çöker.\n"
+                f"Sebep: SDL VİDEO SÜRÜCÜSÜ sorunu ({signature!r}).\n"
+                "Ren'Py, APK üretmeden önce projeyi bir kez açıp kapatıyor "
+                "(derleme meta verisini toplamak için) ve bu adım atlanamıyor. "
+                "O alt süreçte SDL 'dummy' sürücüsüne düşerse OpenGL "
+                "bulunamıyor, çöken yazılım render'ına iniliyor ve süreç "
+                "segfault veriyor.\n"
                 f"Sanal ekran durumu: {display_state}\n"
-                "Bu hata projenizin kodundan KAYNAKLANMIYOR. Docker imajında "
-                "'xvfb' ve 'libgl1-mesa-dri' paketlerinin kurulu olduğundan "
-                "emin olun ve Space'i yeniden derleyin."
+                "Bu hata projenizin kodundan KAYNAKLANMIYOR.\n"
+                "Kontrol listesi:\n"
+                "  1. Docker imajında 'xvfb' ve 'libgl1-mesa-dri' kurulu mu?\n"
+                "  2. Space günlüğünde '[ekran] Sanal ekran hazır' satırı var mı?\n"
+                "  3. Launcher yaması uygulandı mı? İmaj derleme günlüğünde "
+                "'[aerokey] SDK yamalanıyor' satırını arayın. Bu yama, Ren'Py'nin "
+                "alt süreç için sürücüyü 'dummy' seçmesini engelliyor.\n"
+                "Üçü de tamamsa Space'i yeniden derleyin (Factory rebuild)."
             )
         else:
             root_cause = _find_likely_root_cause(full_log)

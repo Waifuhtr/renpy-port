@@ -617,30 +617,62 @@ KeyError: 'bottom'
 ```
 
 **Bu hata projenizin kodundan kaynaklanmaz.** Ren'Py, APK üretmeden önce
-projeyi bir kez **grafiksel olarak açıp** kapatır — derleme meta verisini
-(`build` sözlüğü, Google Play anahtarları) toplamak için. Bu çağrı Ren'Py
-Launcher'ın kaynağında koşulsuzdur, atlanamaz.
+projeyi bir kez **açıp** kapatır — derleme meta verisini (`build` sözlüğü,
+`android_permissions`, `version`) toplamak için. Bu çağrı Ren'Py
+Launcher'ın kaynağında koşulsuzdur, atlanamaz. Toplanan veri APK'nın
+kendisi için gerekli olduğundan "atlayıp devam etmek" de mümkün değildir.
 
-Ekran sunucusu olmayan bir konteynerde SDL "dummy" video sürücüsüne düşer.
-Bu sürücünün OpenGL desteği hiç yoktur; `gl2` ve `gles2` sırayla başarısız
-olur, yazılım render'ına düşülür ve orada segfault gelir (`-11` = sinyal 11).
+### Asıl sebep: Ren'Py sürücüyü kendisi "dummy" yapıyor
+
+Sorun yalnızca "ekran sunucusu yok" değildi. Ren'Py'nin kendi kaynağında
+(`renpy/arguments.py`) şu var:
+
+```python
+register_command("quit", quit)      # uses_display varsayılanı False
+...
+if not display[command]:
+    os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+```
+
+`quit` komutu **display gerektirmiyor** olarak kayıtlı. Yani Ren'Py, bu
+alt süreçte sürücüyü **kendi kararıyla** `dummy` yapar — ortamda geçerli
+bir `DISPLAY` olsa bile. Dummy sürücünün OpenGL'i yoktur; `gl2` ve `gles2`
+başarısız olur, yazılım (`sw`) render'ına düşülür ve orada segfault gelir
+(`-11` = sinyal 11).
+
+Bu, Ren'Py'nin bilinen bir motor hatasıdır ve **gerçek GPU'lu
+masaüstlerinde de** görülür — bkz.
+[renpy/renpy#4549](https://github.com/renpy/renpy/issues/4549), aynı
+belirtiler Docker'sız bir Linux masaüstünde `test` komutuyla.
 
 `KeyError: 'bottom'` **asıl sebep değildir:** alt süreç çökünce Launcher
-kendi "Launching the project failed" penceresini çizmeye çalışır, ama komut
-satırı kipinde ekran katmanları hiç kurulmadığı için o da çöker. Yani
+kendi "Launching the project failed" penceresini çizmeye çalışır, ama
+komut satırı kipinde ekran katmanları kurulmadığı için o da çöker. Yani
 görünen hata, asıl sebebin üstünü örten **ikincil** bir çökmedir.
 
-**Çözüm:** Docker imajında `xvfb` ve `libgl1-mesa-dri` paketleri kurulu
-olmalı (güncel Dockerfile'da var). Uygulama açılışta bellekte çalışan bir
-sanal ekran başlatır ve `DISPLAY` değişkenini ona yöneltir. Space
-günlüğünde şu satırı görmelisiniz:
+### Çözüm iki katmanlı
+
+**1. Sanal ekran.** İmajda `xvfb` ve `libgl1-mesa-dri` bulunur; uygulama
+açılışta bellekte çalışan bir ekran başlatır. Doğrulandı: bu ekran altında
+Mesa/llvmpipe ile gerçek bir OpenGL 4.5 bağlamı kuruluyor.
+
+**2. Launcher yaması (asıl düzeltme).** Yalnızca ekran açmak yetmez —
+Ren'Py yukarıdaki kodla sürücüyü yine `dummy` yapardı. `patch_rapt.py`,
+Launcher'ın alt süreci başlattığı yeri yamalar ve `DISPLAY` varsa
+`SDL_VIDEODRIVER=x11` değerini **önceden** ayarlar. Ren'Py `setdefault`
+kullandığı için bu değeri ezmez; böylece gerçek bir GL bağlamı kurulur ve
+çöken `sw` yoluna hiç düşülmez.
+
+> Yalnızca `DISPLAY` varken devreye girer. Windows/macOS ve gerçek
+> masaüstü kullanımı etkilenmez.
+
+Space günlüğünde şu iki satırı görmelisiniz:
 
 ```
 [ekran] Sanal ekran hazır: :99 (Xvfb başlatıldı (1280x1024x24))
+[aerokey] SDK yamalanıyor: /root/.renutil/8.5.3
 ```
-
-Bunun yerine `[ekran] UYARI:` görüyorsanız Space'i yeniden derleyin —
-imajınız `xvfb` paketinden önceki bir sürümdür.
 
 > **Performans:** Xvfb hiçbir şeyi fiziksel olarak çizmez, yalnızca bellekte
 > bir kare tamponu tutar. Konteyner başına **bir kez** başlatılır, her

@@ -122,12 +122,26 @@ def _apply_render_environment() -> None:
     gürültülü uyarılar üretir; bu adımda hiç ses çalınmayacağı için sessiz
     sürücü doğru seçim.
 
-    SDL_VIDEODRIVER'a BİLEREK dokunmuyoruz: DISPLAY geçerli olduğunda SDL
-    kendiliğinden x11'i seçer. Buraya "dummy" yazmak, düzeltmeye
-    çalıştığımız hatanın ta kendisini geri getirirdi.
+    SDL_VIDEODRIVER=x11: bunu AÇIKÇA ayarlamak zorundayız. "DISPLAY varsa
+    SDL zaten x11 seçer" varsayımı YANLIŞTI — Ren'Py, ekran gerektirmeyen
+    komutlarda (`quit`, `lint`, `test`) sürücüyü kendisi "dummy" yapıyor
+    (renpy/arguments.py). Dummy'nin OpenGL'i olmadığı için gl2/gles2
+    başarısız oluyor ve çöken yazılım render'ına düşülüyor.
+
+    Ren'Py bunu `os.environ.setdefault` ile yaptığından, DEĞERİ ÖNCEDEN
+    ayarlarsak ezmiyor. Bu yüzden burada x11 diyoruz.
+
+    Asıl düzeltme yine de Launcher yamasında (patch_rapt.py): renkit,
+    Ren'Py'yi başlatmadan önce kendi ortamında SDL_VIDEODRIVER'ı "dummy"
+    olarak ZORLA ayarlayabiliyor ve buradaki değeri eziyor. Launcher
+    yaması ise alt sürecin ortamını doğrudan kurduğu için o zincirin
+    sonunda yer alıyor. Buradaki ayar ikinci savunma katmanı.
     """
     os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
     os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+    # Yalnızca gerçekten çalışan bir ekranımız varken x11 diyoruz; ekran
+    # yokken x11 demek, SDL'i var olmayan bir sunucuya bağlanmaya iterdi.
+    os.environ["SDL_VIDEODRIVER"] = "x11"
 
 
 def _terminate(process: subprocess.Popen) -> None:

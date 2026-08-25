@@ -1002,6 +1002,111 @@ def stamp_config(
     return written
 
 
+
+# ---------------------------------------------------------------------------
+# 4b) Launcher: ekransiz sunucuda "quit" alt surecinin cokmesini onle
+# ---------------------------------------------------------------------------
+
+# Ren'Py Launcher'in, projeyi alt surec olarak baslatirken ortami kurdugu yer.
+_LAUNCH_ENV_ANCHOR = "            environ = dict(os.environ)\n"
+
+_LAUNCH_ENV_PATCH = "\n".join([
+    '            environ = dict(os.environ)',
+    '',
+    '            # --- AEROKEY-PATCH: ekransiz sunucu duzeltmesi -------------',
+    "            # Ren'Py, ekran gerektirmeyen komutlarda (`quit`, `lint`,",
+    '            # `test`) SDL_VIDEODRIVER\'i "dummy" yapar',
+    "            # (bkz. renpy/arguments.py). Dummy surucunun OpenGL'i",
+    "            # yoktur; gl2/gles2 basarisiz olur, yazilim (sw) render'ina",
+    '            # dusulur ve orada segfault gelir',
+    '            # ("Launch failed (returned -11)"). Ardindan Launcher kendi',
+    "            # hata penceresini cizemeyip KeyError: 'bottom' ile ikinci",
+    '            # kez coker ve asil sebep gorunmez olur.',
+    '            #',
+    "            # Bu, Ren'Py'nin bilinen bir motor hatasidir ve gercek",
+    "            # GPU'lu masaustlerinde de gorulur (renpy/renpy#4549).",
+    '            #',
+    '            # Kullanilabilir bir X ekrani VARSA (paketleyici bir Xvfb',
+    '            # baslatir), surucuyu acikca "x11" yapiyoruz. Ren\'Py',
+    '            # setdefault kullandigi icin onceden ayarlanmis bu degeri',
+    '            # EZMEZ; boylece gercek bir GL baglami (Mesa/llvmpipe)',
+    '            # kurulur ve coken sw yoluna hic dusulmez.',
+    '            #',
+    '            # DISPLAY yoksa hicbir sey degismez: Windows/macOS ve',
+    '            # gercek masaustu kullanimi etkilenmez.',
+    '            if os.environ.get("DISPLAY"):',
+    '                environ["SDL_VIDEODRIVER"] = "x11"',
+]) + "\n"
+
+
+def launcher_project_file(sdk: Path) -> Optional[Path]:
+    """Launcher'in `project.rpy` dosyasi (SDK'da yoksa None)."""
+    candidate = sdk / "launcher" / "game" / "project.rpy"
+    return candidate if candidate.is_file() else None
+
+
+def patch_launcher_headless(sdk: Path) -> bool:
+    """
+    Launcher'i, ekransiz sunucuda alt sureci duzgun baslatacak sekilde
+    yamalar.
+
+    Doner: yama bu cagrida uygulandi mi (zaten uygulanmissa False).
+
+    Yama uygulanamazsa PatchError yukseltilir: sessizce atlanirsa derleme
+    yine coker ve sebebi anlasilmaz olurdu.
+    """
+    launcher_dir = sdk / "launcher" / "game"
+    target = launcher_project_file(sdk)
+
+    if target is None:
+        if not launcher_dir.is_dir():
+            # Launcher hic yok. Bu kurulumla android_build zaten
+            # calismaz, ama BURADA olumcul olmuyoruz: --all birden cok SDK
+            # kokunu gezer ve yarim bir kurulum yuzunden tum Docker
+            # imajinin derlemesini kirmak orantisiz olur.
+            print(
+                "[aerokey] UYARI: launcher/game bulunamadi, ekransiz yamasi "
+                "atlandi: " + str(sdk),
+                file=sys.stderr,
+            )
+            return False
+
+        # Launcher klasoru VAR ama project.rpy yok: yapisal bir surpriz.
+        # Bunu sessizce gecmek, derlemenin ilerideki asamada anlasilmaz bir
+        # hatayla cokmesine yol acardi.
+        raise PatchError(
+            "Launcher dosyasi bulunamadi: "
+            + str(launcher_dir / "project.rpy")
+        )
+
+    text = read(target)
+
+    if MARKER in text and "SDL_VIDEODRIVER" in text:
+        return False
+
+    if _LAUNCH_ENV_ANCHOR not in text:
+        raise PatchError(
+            str(target)
+            + " icinde beklenen 'environ = dict(os.environ)' satiri"
+            + " bulunamadi. Ren'Py Launcher'in yapisi degismis olabilir;"
+            + " yama korlemesine uygulanmadi."
+        )
+
+    text = text.replace(_LAUNCH_ENV_ANCHOR, _LAUNCH_ENV_PATCH, 1)
+    write(target, text)
+
+    # Bayat .rpyc kalirsa Ren'Py yeni kaynagi derlemeden eskisini
+    # calistirabilir. Kaynak daha yeni oldugu icin normalde yeniden
+    # derlenir, ama bu garantiyi tesaduefe birakmiyoruz.
+    stale = target.with_suffix(".rpyc")
+    try:
+        stale.unlink()
+    except OSError:
+        pass
+
+    return True
+
+
 # ---------------------------------------------------------------------------
 # 5) Gradle dağıtımını önden indirme
 # ---------------------------------------------------------------------------
@@ -1077,6 +1182,7 @@ def apply_all(sdk: Path, skip_gradle_warm: bool = False) -> None:
     patch_root_gradle(sdk, kotlin_version)
     patch_module_gradle(sdk)
     patch_manifest_template(sdk)
+    patch_launcher_headless(sdk)
 
     # Varsayılan (devre dışı) yapılandırmayı yaz ki, paketleyici herhangi bir
     # şey damgalamadan derleme yapılsa bile proje derlenebilsin.
