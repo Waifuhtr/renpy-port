@@ -651,13 +651,44 @@ kendi "Launching the project failed" penceresini çizmeye çalışır, ama
 komut satırı kipinde ekran katmanları kurulmadığı için o da çöker. Yani
 görünen hata, asıl sebebin üstünü örten **ikincil** bir çökmedir.
 
+### İkinci sebep: Steam entegrasyonu
+
+Ekran sorunu çözüldükten sonra alt süreç **hâlâ** `-11` ile ölüyordu, ama
+bu kez ekranla ilgisi yoktu. Ren'Py'nin Steam kapısı
+(`renpy/common/00steam.rpy`):
+
+```python
+dll_path = os.path.join(os.path.dirname(sys.executable), dll_name)
+has_steam = os.path.exists(dll_path)
+if not has_steam:
+    return
+...
+if "RENPY_NO_STEAM" in os.environ:
+    return
+```
+
+`sys.executable` **Ren'Py SDK'sının kendi python'u**, yani aranan
+`libsteam_api.so` SDK'nın `lib/` klasöründe. Sonuç: projenin Steam ile
+hiçbir ilgisi olmasa bile, bu SDK ile yapılan **her** derlemede Steam'in
+yerel (native) kodu yükleniyor ve `InitFlat()` çağrılıyor. Steam
+çalışmayan bir konteynerde bu çağrı başarısız oluyor ve süreç bunun
+ardından segfault veriyor — Python seviyesinde hiçbir iz bırakmadan.
+
+Günlükte alt sürecin `Running init code` satırına hiç ulaşmadan, tam
+Steam mesajlarının ardından öldüğü görülüyor.
+
+**Çözüm:** Ren'Py'nin kendi belgelenmiş kapısı kullanılıyor —
+`RENPY_NO_STEAM` tanımlıysa Steam'e hiç dokunulmuyor. Android APK'sında
+Steam zaten bulunmadığı için bunu kapatmak yalnızca güvenli değil, doğru
+olanı.
+
 ### Çözüm iki katmanlı
 
 **1. Sanal ekran.** İmajda `xvfb` ve `libgl1-mesa-dri` bulunur; uygulama
 açılışta bellekte çalışan bir ekran başlatır. Doğrulandı: bu ekran altında
 Mesa/llvmpipe ile gerçek bir OpenGL 4.5 bağlamı kuruluyor.
 
-**2. Launcher yaması (asıl düzeltme).** Yalnızca ekran açmak yetmez —
+**2. Launcher yaması + `RENPY_NO_STEAM` (asıl düzeltme).** Yalnızca ekran açmak yetmez —
 Ren'Py yukarıdaki kodla sürücüyü yine `dummy` yapardı. `patch_rapt.py`,
 Launcher'ın alt süreci başlattığı yeri yamalar ve `DISPLAY` varsa
 `SDL_VIDEODRIVER=x11` değerini **önceden** ayarlar. Ren'Py `setdefault`

@@ -1008,34 +1008,61 @@ def stamp_config(
 # ---------------------------------------------------------------------------
 
 # Ren'Py Launcher'in, projeyi alt surec olarak baslatirken ortami kurdugu yer.
+# Ren'Py Launcher'in, projeyi alt surec olarak baslatirken ortami kurdugu yer.
 _LAUNCH_ENV_ANCHOR = "            environ = dict(os.environ)\n"
 
+# Yamanin surumu. Enjekte edilen blok degistiginde BURAYI artirin:
+# zaten yamali bir SDK, surum farkli oldugunda blogu YENIDEN yazar.
+# (Isaretci tabanli yamalarin klasik tuzagi, bir kez uygulandiktan
+# sonra kendilerini hic guncelleyememeleridir.)
+_LAUNCHER_PATCH_VERSION = 2
+_LAUNCHER_BEGIN = "# --- AEROKEY-PATCH BEGIN (surum "
+_LAUNCHER_END = "# --- AEROKEY-PATCH END -------------------------------"
+
+# Onceki surumlerin blogunu tumuyle bulup soken desenler.
+_LAUNCHER_BLOCK_RE = re.compile(
+    r"[ \t]*# --- AEROKEY-PATCH BEGIN.*?# --- AEROKEY-PATCH END[^\n]*\n",
+    re.DOTALL,
+)
+
+# Surum 1'in blogunda BEGIN/END isaretcisi YOKTU; comment blogundan
+# baslayip x11 satirinda bitiyordu. Onu da sokebilmemiz gerekiyor, aksi
+# halde surum 2 blogu eskisinin USTUNE eklenir ve dosyada iki blok birden
+# kalirdi.
+_LAUNCHER_LEGACY_RE = re.compile(
+    r"\n[ \t]*# --- AEROKEY-PATCH:.*?"
+    r"environ\[\"SDL_VIDEODRIVER\"\] = \"x11\"[^\n]*\n",
+    re.DOTALL,
+)
+
 _LAUNCH_ENV_PATCH = "\n".join([
-    '            environ = dict(os.environ)',
-    '',
-    '            # --- AEROKEY-PATCH: ekransiz sunucu duzeltmesi -------------',
+    "            environ = dict(os.environ)",
+    '            # --- AEROKEY-PATCH BEGIN (surum 2) --------------------',
+    "            # Bu blok Ren'Py Android Paketleyici tarafindan uretildi.",
+    '            # BEGIN/END arasi her yamada tamamen yenilenir.',
+    '            #',
+    '            # 1) SDL video surucusu',
     "            # Ren'Py, ekran gerektirmeyen komutlarda (`quit`, `lint`,",
     '            # `test`) SDL_VIDEODRIVER\'i "dummy" yapar',
-    "            # (bkz. renpy/arguments.py). Dummy surucunun OpenGL'i",
-    "            # yoktur; gl2/gles2 basarisiz olur, yazilim (sw) render'ina",
-    '            # dusulur ve orada segfault gelir',
-    '            # ("Launch failed (returned -11)"). Ardindan Launcher kendi',
-    "            # hata penceresini cizemeyip KeyError: 'bottom' ile ikinci",
-    '            # kez coker ve asil sebep gorunmez olur.',
+    "            # (renpy/arguments.py). Dummy'nin OpenGL'i yoktur; gl2 ve",
+    "            # gles2 basarisiz olur, coken yazilim (sw) render'ina",
+    "            # dusulur. Ren'Py setdefault kullandigi icin ONCEDEN",
+    '            # ayarlanmis degeri ezmez.',
     '            #',
-    "            # Bu, Ren'Py'nin bilinen bir motor hatasidir ve gercek",
-    "            # GPU'lu masaustlerinde de gorulur (renpy/renpy#4549).",
-    '            #',
-    '            # Kullanilabilir bir X ekrani VARSA (paketleyici bir Xvfb',
-    '            # baslatir), surucuyu acikca "x11" yapiyoruz. Ren\'Py',
-    '            # setdefault kullandigi icin onceden ayarlanmis bu degeri',
-    '            # EZMEZ; boylece gercek bir GL baglami (Mesa/llvmpipe)',
-    '            # kurulur ve coken sw yoluna hic dusulmez.',
-    '            #',
-    '            # DISPLAY yoksa hicbir sey degismez: Windows/macOS ve',
-    '            # gercek masaustu kullanimi etkilenmez.',
+    '            # 2) Steam',
+    "            # Ren'Py, python calistirilabilirinin YANINDA libsteam_api.so",
+    "            # varsa Steam'i baslatmayi dener. Bu dosya SDK'nin kendi",
+    '            # lib klasorunde bulunur, yani PROJE Steam ile ilgisiz olsa',
+    "            # bile her derlemede Steam'in yerel kodu cagrilir. Steam",
+    '            # calismayan bir konteynerde InitFlat() basarisiz olur ve',
+    '            # surec bunun ardindan segfault verebilir (returned -11).',
+    "            # Ren'Py bunun icin belgelenmis bir kapi sunuyor:",
+    "            # RENPY_NO_STEAM tanimliysa Steam'e hic dokunulmaz.",
+    "            # Android APK'sinda Steam zaten yok, yani kapatmak dogru.",
+    '            environ["RENPY_NO_STEAM"] = "1"',
     '            if os.environ.get("DISPLAY"):',
     '                environ["SDL_VIDEODRIVER"] = "x11"',
+    '            # --- AEROKEY-PATCH END -------------------------------',
 ]) + "\n"
 
 
@@ -1050,7 +1077,12 @@ def patch_launcher_headless(sdk: Path) -> bool:
     Launcher'i, ekransiz sunucuda alt sureci duzgun baslatacak sekilde
     yamalar.
 
-    Doner: yama bu cagrida uygulandi mi (zaten uygulanmissa False).
+    Iki soruna birden cozum uretir; ayrintili gerekce enjekte edilen
+    blogun kendi yorumlarinda:
+      1. SDL video surucusunun "dummy" secilmesi,
+      2. Steam yerel kodunun konteynerde segfault vermesi.
+
+    Doner: dosya bu cagrida degistirildi mi.
 
     Yama uygulanamazsa PatchError yukseltilir: sessizce atlanirsa derleme
     yine coker ve sebebi anlasilmaz olurdu.
@@ -1061,19 +1093,17 @@ def patch_launcher_headless(sdk: Path) -> bool:
     if target is None:
         if not launcher_dir.is_dir():
             # Launcher hic yok. Bu kurulumla android_build zaten
-            # calismaz, ama BURADA olumcul olmuyoruz: --all birden cok SDK
-            # kokunu gezer ve yarim bir kurulum yuzunden tum Docker
+            # calismaz, ama BURADA olumcul olmuyoruz: --all birden cok
+            # SDK kokunu gezer ve yarim bir kurulum yuzunden tum Docker
             # imajinin derlemesini kirmak orantisiz olur.
             print(
-                "[aerokey] UYARI: launcher/game bulunamadi, ekransiz yamasi "
-                "atlandi: " + str(sdk),
+                "[aerokey] UYARI: launcher/game bulunamadi, ekransiz "
+                "yamasi atlandi: " + str(sdk),
                 file=sys.stderr,
             )
             return False
 
         # Launcher klasoru VAR ama project.rpy yok: yapisal bir surpriz.
-        # Bunu sessizce gecmek, derlemenin ilerideki asamada anlasilmaz bir
-        # hatayla cokmesine yol acardi.
         raise PatchError(
             "Launcher dosyasi bulunamadi: "
             + str(launcher_dir / "project.rpy")
@@ -1081,8 +1111,16 @@ def patch_launcher_headless(sdk: Path) -> bool:
 
     text = read(target)
 
-    if MARKER in text and "SDL_VIDEODRIVER" in text:
+    current_tag = _LAUNCHER_BEGIN + str(_LAUNCHER_PATCH_VERSION) + ")"
+    if current_tag in text:
+        print("[aerokey] Launcher yamasi zaten guncel (surum "
+              + str(_LAUNCHER_PATCH_VERSION) + "): " + str(target))
         return False
+
+    # Eski surumden kalan blok varsa once tumuyle sok (her iki bicim de).
+    text, removed = _LAUNCHER_BLOCK_RE.subn("", text)
+    text, removed_legacy = _LAUNCHER_LEGACY_RE.subn("", text)
+    removed += removed_legacy
 
     if _LAUNCH_ENV_ANCHOR not in text:
         raise PatchError(
@@ -1103,6 +1141,14 @@ def patch_launcher_headless(sdk: Path) -> bool:
         stale.unlink()
     except OSError:
         pass
+
+    if removed:
+        print("[aerokey] Launcher yamasi surum "
+              + str(_LAUNCHER_PATCH_VERSION) + " olarak yenilendi: "
+              + str(target))
+    else:
+        print("[aerokey] Launcher yamasi uygulandi (surum "
+              + str(_LAUNCHER_PATCH_VERSION) + "): " + str(target))
 
     return True
 

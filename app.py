@@ -123,6 +123,29 @@ if DISPLAY_INFO.active:
 else:
     print(f"[ekran] UYARI: sanal ekran kurulamadı. {DISPLAY_INFO.note}", file=sys.stderr)
 
+# --- Steam entegrasyonunu kapat ---------------------------------------
+# Ren'Py, python çalıştırılabilirinin YANINDA libsteam_api.so varsa Steam'i
+# başlatmayı dener (renpy/common/00steam.rpy):
+#
+#     dll_path = os.path.join(os.path.dirname(sys.executable), dll_name)
+#     has_steam = os.path.exists(dll_path)
+#
+# Bu dosya Ren'Py SDK'sının kendi lib klasöründe bulunur. Yani PROJENİN
+# Steam ile hiçbir ilgisi olmasa bile, bu SDK ile yapılan HER derlemede
+# Steam'in yerel (native) kodu çağrılıyor. Steam çalışmayan bir
+# konteynerde InitFlat() başarısız oluyor ve süreç bunun ardından
+# segfault verebiliyor ("Launch failed (returned -11)") — Python
+# seviyesinde hiçbir iz bırakmadan.
+#
+# Ren'Py bunun için belgelenmiş bir kapı sunuyor: RENPY_NO_STEAM tanımlıysa
+# Steam'e hiç dokunulmuyor. Android APK'sında Steam zaten bulunmadığı için
+# kapatmak yalnızca güvenli değil, doğru olanı.
+#
+# Bunu burada ayarlamak yeterli: derleme alt süreçleri (renconstruct ->
+# Launcher -> oyun) ortamı miras alıyor ve Launcher alt süreci
+# `dict(os.environ)` ile kuruyor.
+os.environ["RENPY_NO_STEAM"] = "1"
+
 GAME_ID_PREFIX = os.environ.get("AEROKEY_GAME_ID_PREFIX", "riaslink_oyun_")
 GAME_ID_REGISTRY = DATA_DIR / "game_ids.json"
 SIGNING_DIR = DATA_DIR / "signing"
@@ -820,6 +843,33 @@ _HEADLESS_FAILURE_PATTERNS = [
         r"Could not initialize SDL",
     )
 ]
+
+
+# Steam yerel kodunun konteynerde cokmesinin imzalari.
+_STEAM_FAILURE_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"Failed to initialize steam",
+        r"SteamAPI_Init\(\)",
+        r"steamclient\.so",
+    )
+]
+
+
+def _looks_like_steam_failure(log: str) -> Optional[str]:
+    """
+    Çökmenin arkasında Steam entegrasyonu mu var?
+
+    Ren'Py, SDK'nın lib klasöründe libsteam_api.so bulunca Steam'i
+    başlatmayı dener; Steam'siz bir konteynerde bu çağrı başarısız olur ve
+    süreç ardından segfault verebilir. Bu, oyuncunun projesiyle ilgili
+    DEĞİLDİR ve RENPY_NO_STEAM ile tamamen kapatılır.
+    """
+    for pattern in _STEAM_FAILURE_PATTERNS:
+        match = pattern.search(log)
+        if match:
+            return match.group(0)
+    return None
 
 
 def _looks_like_headless_failure(log: str) -> Optional[str]:
@@ -1835,6 +1885,21 @@ def _execute_build(
                 "Gradle ya da Android SDK bileşenleri indirilemedi. Projenizde "
                 "bir sorun olduğu anlamına gelmez — birkaç dakika sonra tekrar "
                 f"deneyin ({max_attempts} otomatik deneme zaten yapıldı)."
+            )
+        elif _looks_like_steam_failure(full_log) and "returned -11" in full_log:
+            # Steam yerel kodu çöktü. Bu, projenin Steam ile ilgisi olmasa
+            # bile olabiliyor: libsteam_api.so Ren'Py SDK'sının kendi lib
+            # klasöründe duruyor ve her derlemede yükleniyor.
+            job.log(
+                f"\nDerleme HATA ile sonuçlandı (kod {return_code}).\n"
+                f"Sebep: STEAM entegrasyonu ({_looks_like_steam_failure(full_log)!r}).\n"
+                "Ren'Py, SDK'nın lib klasöründe libsteam_api.so bulduğu için "
+                "Steam'i başlatmaya çalışıyor; Steam olmayan bir konteynerde "
+                "bu çağrı başarısız oluyor ve süreç segfault veriyor.\n"
+                "Bu hata projenizin kodundan KAYNAKLANMIYOR.\n"
+                "Paketleyici bunu RENPY_NO_STEAM ile kapatıyor; bu mesajı "
+                "görüyorsanız app.py güncel değil ya da ortam değişkeni alt "
+                "sürece ulaşmıyor demektir."
             )
         elif _looks_like_headless_failure(full_log):
             # Ekransız ortam çökmesi. Bunu "projenizde hata var" diye
