@@ -1154,6 +1154,105 @@ def patch_launcher_headless(sdk: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 4c) Launcher: hazir dump varsa oyunu yeniden acma
+# ---------------------------------------------------------------------------
+
+_DUMP_ANCHOR = "        p.update_dump(True, gui=gui)\n"
+
+_DUMP_PATCH_VERSION = 1
+_DUMP_BEGIN = "# --- AEROKEY-DUMP BEGIN (surum "
+
+_DUMP_BLOCK_RE = re.compile(
+    r"[ \t]*# --- AEROKEY-DUMP BEGIN.*?# --- AEROKEY-DUMP END[^\n]*\n",
+    re.DOTALL,
+)
+
+_DUMP_PATCH = "\n".join([
+    '        # --- AEROKEY-DUMP BEGIN (surum 1) ---------------------',
+    "        # Bu blok Ren'Py Android Paketleyici tarafindan uretildi.",
+    '        # BEGIN/END arasi her yamada tamamen yenilenir.',
+    '        #',
+    '        # ESKI HALI: update_dump cagrisinda force=True idi.',
+    '        #',
+    '        # force=True, dump dosyasi zaten dursa bile oyunu bir alt',
+    '        # surecte YENIDEN acar. O alt surec oyunun kendi init python',
+    '        # bloklarini calistiriyor (renpy/main.py, execute_init dongusu)',
+    '        # ve bazi oyunlarda ekransiz konteynerde segfault veriyor:',
+    '        # "Launch failed (returned -11)". Sebep oyundan oyuna degisir',
+    '        # ve disaridan guvenilir sekilde duzeltilemez, cunku calisan',
+    '        # sey OYUNUN kendi kodudur.',
+    '        #',
+    '        # force=False ile: dump dosyasi varsa oldugu gibi okunur, alt',
+    '        # surec HIC baslatilmaz. Paketleyici dosyayi derlemeden once',
+    '        # kendisi yaziyor (aerokey/build_dump.py).',
+    '        #',
+    "        # Dosya YOKSA davranis degismez: Ren'Py yine alt sureci",
+    '        # baslatip dump uretir. Yani bu yama hicbir seyi bozmaz,',
+    '        # yalnizca hazir dump varsa ona oncelik verir.',
+    '        p.update_dump(False, gui=gui)',
+    '        # --- AEROKEY-DUMP END --------------------------------',
+]) + "\n"
+
+
+def patch_launcher_dump(sdk: Path) -> bool:
+    """
+    Launcher'i, hazir bir dump dosyasi varsa oyunu YENIDEN ACMAYACAK
+    sekilde yamalar.
+
+    Gerekce enjekte edilen blogun kendi yorumlarinda.
+
+    Doner: dosya bu cagrida degistirildi mi.
+    """
+    launcher_dir = sdk / "launcher" / "game"
+    target = launcher_dir / "android.rpy"
+
+    if not target.is_file():
+        if not launcher_dir.is_dir():
+            # Launcher hic yok; patch_launcher_headless zaten uyardi.
+            return False
+        raise PatchError(
+            "Launcher dosyasi bulunamadi: " + str(target)
+        )
+
+    text = read(target)
+
+    current_tag = _DUMP_BEGIN + str(_DUMP_PATCH_VERSION) + ")"
+    if current_tag in text:
+        print("[aerokey] Dump yamasi zaten guncel (surum "
+              + str(_DUMP_PATCH_VERSION) + "): " + str(target))
+        return False
+
+    # Eski surumden kalan blok varsa once sok ve ozgun satiri geri koy.
+    text, removed = _DUMP_BLOCK_RE.subn(_DUMP_ANCHOR, text)
+
+    if _DUMP_ANCHOR not in text:
+        raise PatchError(
+            str(target)
+            + " icinde beklenen 'p.update_dump(True, gui=gui)' satiri"
+            + " bulunamadi. Ren'Py Launcher'in yapisi degismis olabilir;"
+            + " yama korlemesine uygulanmadi."
+        )
+
+    text = text.replace(_DUMP_ANCHOR, _DUMP_PATCH, 1)
+    write(target, text)
+
+    stale = target.with_suffix(".rpyc")
+    try:
+        stale.unlink()
+    except OSError:
+        pass
+
+    if removed:
+        print("[aerokey] Dump yamasi surum "
+              + str(_DUMP_PATCH_VERSION) + " olarak yenilendi: " + str(target))
+    else:
+        print("[aerokey] Dump yamasi uygulandi (surum "
+              + str(_DUMP_PATCH_VERSION) + "): " + str(target))
+
+    return True
+
+
+# ---------------------------------------------------------------------------
 # 5) Gradle dağıtımını önden indirme
 # ---------------------------------------------------------------------------
 
@@ -1229,6 +1328,7 @@ def apply_all(sdk: Path, skip_gradle_warm: bool = False) -> None:
     patch_module_gradle(sdk)
     patch_manifest_template(sdk)
     patch_launcher_headless(sdk)
+    patch_launcher_dump(sdk)
 
     # Varsayılan (devre dışı) yapılandırmayı yaz ki, paketleyici herhangi bir
     # şey damgalamadan derleme yapılsa bile proje derlenebilsin.

@@ -47,6 +47,7 @@ from aerokey import patch_rapt  # noqa: E402  (yol ayarından sonra gelmeli)
 from aerokey import translation as translation_pack  # noqa: E402
 from aerokey import rpa as rpa_archive  # noqa: E402
 from aerokey import display as virtual_display  # noqa: E402
+from aerokey import build_dump  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
@@ -1839,6 +1840,36 @@ def _execute_build(
         f'keystore_aab = "{keystore_b64}"',
     ]
     config_path.write_text("\n".join(toml_lines) + "\n", encoding="utf-8")
+
+    # --- Derleme meta verisi (navigation.json) ---------------------------
+    # Ren'Py normalde bu veriyi toplamak için oyunu bir alt süreçte AÇIP
+    # kapatır; o alt süreç oyunun kendi init python bloklarını çalıştırır ve
+    # bazı oyunlarda ekransız konteynerde segfault veriyor. Dosyayı biz
+    # yazınca Launcher (yamalı hâliyle) alt süreci hiç başlatmıyor.
+    _sdk_list = _sdk_roots()
+    dump_result = build_dump.write_dump(
+        project_root,
+        _sdk_list[0] if _sdk_list else None,
+        identity.version,
+    )
+    if dump_result.path is not None:
+        if dump_result.permissions:
+            izinler = ", ".join(dump_result.permissions)
+        else:
+            izinler = "yok (Ren'Py'nin varsayılanları kullanılacak)"
+        job.log(
+            f"\nDerleme meta verisi hazırlandı ({dump_result.scanned_files} "
+            f"betik tarandı).\n"
+            f"  - sürüm : {identity.version}\n"
+            f"  - izinler: {izinler}\n"
+            "  Bu sayede Ren'Py, meta veri toplamak için oyunu ayrıca "
+            "açmak zorunda kalmıyor."
+        )
+    else:
+        job.log(
+            f"\nUyarı: derleme meta verisi hazırlanamadı ({dump_result.note}). "
+            "Ren'Py bunu kendisi toplamayı deneyecek."
+        )
 
     job.log(
         "\nAndroid derlemesi başlatılıyor. İlk çalıştırmada Android SDK "

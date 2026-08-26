@@ -682,6 +682,52 @@ Steam mesajlarının ardından öldüğü görülüyor.
 Steam zaten bulunmadığı için bunu kapatmak yalnızca güvenli değil, doğru
 olanı.
 
+### Üçüncü sebep: oyunun kendi init kodu
+
+Steam de kapatıldıktan sonra alt süreç **hâlâ** `-11` ile ölüyordu. Ren'Py'nin
+`main.py` dosyasında iki günlük satırı arasındaki kod şu:
+
+```python
+log_clock("Loading persistent")
+...
+for id_, (_prio, node) in enumerate(game.script.initcode):
+    node.execute_init()          # <-- OYUNUN kendi init python blokları
+...
+log_clock("Running init code")
+```
+
+Alt süreç `Loading persistent`'ı yazıyor ama `Running init code`'a hiç
+ulaşmıyor. Yani çökme **oyunun kendi init kodunun içinde**. Sebebi oyundan
+oyuna değişir (yerel kütüphane, yazı tipi, ses aygıtı…) ve dışarıdan
+güvenilir biçimde düzeltilemez — çalışan şey oyunun kendi kodudur.
+
+### Çözüm: adımı düzeltmek yerine ona olan bağımlılığı kaldırmak
+
+Bu adımı çalıştırmaya çalışmak yerine, **hiç çalıştırmıyoruz**.
+
+Launcher'ın bu alt süreçten aldığı tek şey `navigation.json` içindeki
+`build` sözlüğü ve oradan okuduğu alanlar yalnızca şunlar:
+
+| Alan | Nereden geliyor |
+|---|---|
+| `google_play_key` | yoksa `None` (isteğe bağlı) |
+| `google_play_salt` | yoksa `None` (isteğe bağlı) |
+| `destination` | yalnızca GUI kipinde okunur, bizde okunmaz |
+| `version` | zaten biliyoruz |
+| `android_permissions` | derlenmiş `.rpyc`'den taranıyor |
+
+Paketleyici bu dosyayı derlemeden önce kendisi yazıyor
+(`aerokey/build_dump.py`), Launcher da yamalı hâliyle
+`update_dump(force=False)` çağırıyor — dosya hazır olduğu için alt süreci
+**hiç başlatmıyor**.
+
+İzinler, derlenmiş kodda `android.permission.XXX` düz metin olarak durduğu
+için taranarak kurtarılıyor; bulunanlar derleme günlüğüne yazılıyor.
+
+> Dump dosyası yoksa davranış değişmez: Ren'Py yine alt süreci başlatıp
+> dump üretir. Yani bu yama hiçbir şeyi bozmaz, yalnızca hazır dump varsa
+> ona öncelik verir.
+
 ### Çözüm iki katmanlı
 
 **1. Sanal ekran.** İmajda `xvfb` ve `libgl1-mesa-dri` bulunur; uygulama
