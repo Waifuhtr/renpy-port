@@ -50,6 +50,7 @@ from aerokey import display as virtual_display  # noqa: E402
 from aerokey import build_dump  # noqa: E402
 from aerokey import resources  # noqa: E402
 from aerokey import icons  # noqa: E402
+from aerokey import pymodules  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
@@ -1862,6 +1863,40 @@ def _execute_build(
     # açtıktan sonra okunabilir hale gelir.
     if not _extract_rpa_archives(job, project_root):
         return
+
+    # --- Kök seviyesindeki Python eklentileri ----------------------------
+    # Bazı oyunlar saf Python kütüphanelerini game/ ile aynı seviyede ayrı
+    # bir klasörde tutar ve düz `import X` ile çağırır. Masaüstünde bu
+    # çalışır (başlatıcı proje kökünü sys.path'e ekler), Android'de ÇALIŞMAZ:
+    # orada import, Ren'Py'nin kendi importer'ına düşer ve o da modülleri
+    # yalnızca game/ altında arar. Sonuç: oyun açılır açılmaz
+    # ModuleNotFoundError. RPA açıldıktan SONRA çalışıyoruz ki arşiv
+    # içindeki script'lerdeki import satırları da taranabilsin.
+    pym = pymodules.relocate_python_packages(project_root)
+    if pym.ok:
+        satirlar = []
+        for paket in pym.moved:
+            ithal = ", ".join(paket.imported)
+            satirlar.append(
+                f"  - {paket.name}/ ({paket.files} dosya) -> game/{paket.name}/"
+                f"\n      import edilen: {ithal}"
+            )
+        job.log(
+            "\nProje kökünde Python eklenti klasörü bulundu ve Android'de "
+            "çalışacak şekilde yerleştirildi:\n"
+            + "\n".join(satirlar)
+            + "\n  Masaüstünde bu klasörler proje kökünden import edilir; "
+            "Android'de böyle bir yol olmadığı için game/ içine taşınıp "
+            "renpy.add_python_directory() ile modül yoluna kaydedildi.\n"
+            "  Oyununuzun kendi dosyaları DEĞİŞTİRİLMEDİ (yalnızca geçici "
+            "çalışma kopyası)."
+        )
+    elif pym.skipped:
+        job.log(
+            "\nBilgi: kökteki şu klasörler Python eklentisi gibi görünüyor "
+            "ama oyun script'lerinde import edildiklerine dair iz yok, bu "
+            "yüzden dokunulmadı: " + ", ".join(pym.skipped)
+        )
 
     # --- Kimlik ----------------------------------------------------------
     identity = _resolve_identity(

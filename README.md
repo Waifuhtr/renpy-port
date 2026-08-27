@@ -484,6 +484,86 @@ yok sayılır.
 
 ---
 
+## 🐍 Proje kökündeki Python eklentileri
+
+Bazı oyunlar saf Python kütüphanelerini `game/` ile **aynı seviyede** ayrı
+bir klasörde tutar ve script'lerinden düz `import X` ile çağırır:
+
+```
+OyunKökü/
+  game/
+    01_settings/preset/lovense.rpy   ->  import LovenseRemoteSDK
+  lovenseplugin/
+    LovenseRemoteSDK.py
+```
+
+Masaüstünde bu çalışır, çünkü oyunun başlatıcısı proje kökünü `sys.path`'e
+ekler:
+
+```python
+renpy_base = path_to_renpy_base()
+sys.path.append(renpy_base)
+```
+
+**Android'de böyle bir "gerçek dosya sistemi yolu" yoktur.** Orada `import`,
+Ren'Py'nin kendi `RenpyImporter`'ına düşer (`renpy/importer.py`) ve o da
+modülleri yalnızca `renpy.loader.game_files` içinde arar — yani yalnızca
+`game/` (ve `common/`) altında taranan dosyalarda. Kökteki kardeş klasörler
+bu taramaya **hiç girmez**, dolayısıyla oyun açılır açılmaz şunu verir:
+
+```
+ModuleNotFoundError: No module named 'LovenseRemoteSDK'
+```
+
+### Ne yapılıyor
+
+Geçici çalışma kopyasında iki adım:
+
+1. Klasör `game/` içine taşınır (böylece varlık taramasına girer).
+2. Ren'Py'nin **belgelenmiş** API'siyle modül arama yoluna eklenir:
+
+   ```python
+   init -500 python:
+       renpy.add_python_directory("lovenseplugin")
+   ```
+
+İkinci adım şart: klasör `game/` içine taşınınca modül adı
+`lovenseplugin.LovenseRemoteSDK` olurdu; oyun ise düz `LovenseRemoteSDK`
+diye çağırıyor. Önek eklenince `RenpyImporter` doğru anahtarı buluyor.
+
+`init -500`: oyunun kendi `init python` blokları varsayılan olarak 0
+önceliktedir, negatif değer bu kaydın **onlardan önce** çalışmasını
+garantiler. Importer bootstrap sırasında kurulduğu için bu noktada çoktan
+hazırdır.
+
+> Oyununuzun kendi `.rpy` dosyalarına **dokunulmaz**; çağrı ayrıca üretilen
+> tek bir betiğe konur. Özgün dosyalarınız da değişmez — yalnızca o
+> derlemenin geçici kopyası.
+
+### Neden genel
+
+Klasör adı sabit kodlanmaz. Kökteki her klasör için iki koşul aranır:
+içinde `.py` var mı, **ve** oyun script'leri o modülleri gerçekten import
+ediyor mu. İkisi de doğruysa taşınır. Böylece:
+
+- aynı deseni başka bir isimle kullanan oyunlar da kendiliğinden çalışır,
+- `docs/` gibi alakasız klasörler boşuna taşınıp APK'yı büyütmez.
+
+Import taraması `.rpy` **ve** derlenmiş `.rpyc` üzerinde yapılır: derlenmiş
+bir dağıtım paketinde `.rpy` kaynakları hiç bulunmaz, oysa `import`
+satırları derlenmiş kodda düz metin olarak durur.
+
+Derleme günlüğünde şunu görürsünüz:
+
+```
+Proje kökünde Python eklenti klasörü bulundu ve Android'de çalışacak
+şekilde yerleştirildi:
+  - lovenseplugin/ (8 dosya) -> game/lovenseplugin/
+      import edilen: LovenseRemoteSDK, Toys, LvsConstant
+```
+
+---
+
 ## 📦 Sıkıştırılmış oyun verisi (`archive.rpa`)
 
 `Build Distributions` çıktısı oyun dosyalarını genelde tek bir
@@ -623,6 +703,7 @@ denetim gerekli.
 | Java/Gradle sürüm uyuşmazlığı | Ren'Py sürümünüze göre Dockerfile'daki JDK sürümünü (8 ↔ 21) güncelleyin. |
 | `Launch failed (returned -11)` / `KeyError: 'bottom'` / `SDL video driver (dummy)` | **Ekran sunucusu yok.** Aşağıya bakın. |
 | `Packaging internal data.` sonrası `Unable to launch Ren'Py: Status 1` (yığın izi YOK) | Süreç bir sinyalle öldürülmüş — genelde **bellek yetersizliği**. Aşağıya bakın. |
+| Oyun açılırken `ModuleNotFoundError: No module named 'X'` | Proje kökündeki bir Python eklenti klasörü. Araç bunu otomatik taşır; günlükte "Python eklenti klasörü bulundu" satırını arayın. |
 
 ### `Launch failed (returned -11)` — ekran sunucusu sorunu
 
