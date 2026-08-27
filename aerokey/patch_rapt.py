@@ -1265,67 +1265,53 @@ def patch_launcher_dump(sdk: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 4d) RAPT paketleme adimi: bellek tavani ve alt adim isaretcileri
+# 4d) RAPT paketleme adimi: bellek tavani, ikon izolasyonu, adim gunlugu
 # ---------------------------------------------------------------------------
 
-_BUILD_PATCH_VERSION = 1
+_BUILD_PATCH_VERSION = 2
 _BUILD_BEGIN = "# --- AEROKEY-BUILD BEGIN (surum "
 
-# Yamanin tutundugu uc nokta. Ucu de RAPT 8.5.3 kaynaginda birebir
-# dogrulandi (renpy.org/dl/8.5.3/renpy-8.5.3-rapt.zip) ve dosyada
-# yalnizca BIRER kez geciyor.
+
+def _build_stamp(lines: list) -> str:
+    """Blok metnini birlestirir ve surum yer tutucusunu doldurur."""
+    return _stamp_version(lines, _BUILD_PATCH_VERSION)
+
+
+def _block_re(tag: str):
+    """Bir blogun BEGIN/END arasini tumuyle yakalayan desen."""
+    return re.compile(
+        r"[ \t]*# --- AEROKEY-" + tag + r" BEGIN.*?"
+        r"# --- AEROKEY-" + tag + r" END[^\n]*\n",
+        re.DOTALL,
+    )
+
+
+# Yardimci blok ZORUNLUDUR: butun adim isaretcileri ona bagli. Silinirken
+# ardindaki bos satirlar da yutulur, cunku blok enjekte edilirken onlar
+# eklenmisti; boylece sokme dosyayi BIREBIR eski haline dondurur.
 _BUILD_HELPER_ANCHOR = "class PatternList(object):\n"
 
-_BUILD_TAR_ANCHOR = (
-    "    make_tar(iface, private_mp3, private_dirs)\n"
-    "\n"
-    '    with open(private_mp3, "rb") as f:\n'
-    "        private_version = hashlib.md5(f.read()).hexdigest()\n"
-)
-
-_BUILD_ICON_ANCHOR = (
-    "    if config.update_icons:\n"
-    "        iconmaker.IconMaker(directory, config)\n"
-)
-
-# Onceki surumlerin bloklarini soken desenler. Yardimci blok silinirken
-# ardindaki bos satirlar da yutulur, cunku blok enjekte edilirken onlar
-# eklenmisti; boylece sokme islemi dosyayi BIREBIR eski haline dondurur.
 _BUILD_HELPER_RE = re.compile(
     r"[ \t]*# --- AEROKEY-BUILD BEGIN.*?# --- AEROKEY-BUILD END[^\n]*\n\n*",
     re.DOTALL,
 )
-
-_BUILD_TAR_RE = re.compile(
-    r"[ \t]*# --- AEROKEY-TAR BEGIN.*?# --- AEROKEY-TAR END[^\n]*\n",
-    re.DOTALL,
-)
-
-_BUILD_ICON_RE = re.compile(
-    r"[ \t]*# --- AEROKEY-ICON BEGIN.*?# --- AEROKEY-ICON END[^\n]*\n",
-    re.DOTALL,
-)
-
-# Blok metinlerindeki "(surum #)" yer tutucusunu _stamp_version dolduruyor
-# (bkz. 4b bolumu): surum numarasini metne elle yazmak, sabit artirildiginda
-# yamanin her derlemede kendini yeniden yazmasina yol acardi.
-def _build_stamp(lines: list) -> str:
-    return _stamp_version(lines, _BUILD_PATCH_VERSION)
-
 
 _BUILD_HELPER_PATCH = _build_stamp([
     '# --- AEROKEY-BUILD BEGIN (surum #) -------------------------------------',
     "# Bu blok Ren'Py Android Paketleyici tarafindan uretildi.",
     '# BEGIN/END arasi her yamada tamamen yenilenir.',
     '#',
-    '# Amac: "Packaging internal data." asamasinda IZ BIRAKMADAN olen',
-    '# derlemeleri teshis edilebilir kilmak.',
+    '# Iki is yapar:',
+    '#   1. Derlemenin her adimini zaman + bellek ile gunluge yazar.',
+    '#   2. Ikon uretimini pygame yerine hazir dosyalardan yapar.',
     '#',
-    '# O asamada surec bir sinyalle olurse (bellek bitince OOM-killer SIGKILL',
-    '# gonderir; yerel bir kutuphane cokerse SIGSEGV) Python tarafinda yigin',
-    '# izi OLUSMAZ. Disaridan gorunen tek sey renutil\'in "Unable to launch',
-    '# Ren\'Py: Status 1" mesaji olur ve hangi alt adimda olundugu bilinmez.',
-    '# Asagidaki isaretciler o bosluğu dolduruyor.',
+    '# Neden: bu asamada surec bir sinyalle olurse (bellek bitince SIGKILL,',
+    '# yerel kod cokerse SIGSEGV) Python tarafinda yigin izi OLUSMAZ.',
+    '# Disaridan gorunen tek sey renutil\'in "Unable to launch Ren\'Py:',
+    '# Status 1" mesajidir. Adim isaretcileri o boslugu dolduruyor.',
+    '',
+    '',
+    '_aerokey_baslangic = []',
     '',
     '',
     'def _aerokey_free_memory():',
@@ -1333,9 +1319,7 @@ _BUILD_HELPER_PATCH = _build_stamp([
     '    Konteynerde kalan bellek (bayt). Bilinemiyorsa None.',
     '',
     '    Konteyner icinde /proc/meminfo HOST makinenin bellegini gosterir, bu',
-    "    yuzden once cgroup sinirina bakiyoruz: 64 GB RAM'li bir sunucuda",
-    '    calisan 2 GB sinirli bir konteyner /proc/meminfo\'ya gore "bol bol yer',
-    '    var" der ve sinirina carpip olur.',
+    '    yuzden once cgroup sinirina bakiyoruz.',
     '    """',
     '    import io',
     '',
@@ -1370,88 +1354,234 @@ _BUILD_HELPER_PATCH = _build_stamp([
     '',
     'def _aerokey_step(name):',
     '    """',
-    '    Paketleme asamasinin bir alt adimini gunluge isaretler.',
+    '    Derlemenin bir adimini gunluge isaretler: gecen sure + bos bellek.',
     '',
     '    Bu fonksiyon ASLA hata firlatmaz: bir teshis yardimcisinin derlemeyi',
     '    dusurmesi kabul edilemez olurdu.',
     '    """',
     '    try:',
+    '        import time as _t',
+    '        if not _aerokey_baslangic:',
+    '            _aerokey_baslangic.append(_t.time())',
+    '        gecen = _t.time() - _aerokey_baslangic[0]',
+    '',
     '        free = _aerokey_free_memory()',
     '        if free is None:',
-    '            note = "bos bellek: bilinmiyor"',
+    '            bellek = "bellek: ?"',
     '        else:',
-    '            note = "bos bellek: %.2f GB" % (free / (1024.0 ** 3),)',
-    '        sys.stdout.write("[aerokey] adim: %s | %s\\n" % (name, note))',
+    '            bellek = "bellek: %6.2f GB bos" % (free / (1024.0 ** 3),)',
+    '',
+    '        sys.stdout.write("[aerokey] %7.1fs | %s | %s\\n" % (gecen, bellek, name))',
     '        sys.stdout.flush()',
     '    except Exception:',
     '        pass',
     '',
     '',
+    'def _aerokey_install_icons():',
+    '    """',
+    '    Paketleyicinin ONCEDEN urettigi mipmap ikonlarini yerine kopyalar.',
+    '',
+    '    Neden: RAPT ikonlari pygame ile uretir (image.load, convert_alpha,',
+    '    smoothscale, BLEND_RGBA_MULT) ve bunlarin hepsi yerel koddur. Yerel',
+    '    kod coktugunde surec iz birakmadan olur ve TUM derleme gider.',
+    '    Ikonlari disarida, Pillow ile uretip buraya yalnizca kopyalatinca o',
+    '    kod yolu hic calistirilmaz.',
+    '',
+    "    Doner: kopyalandi mi. False donerse cagiran taraf RAPT'in kendi",
+    "    IconMaker'ini calistirir, yani ESKI DAVRANIS aynen korunur.",
+    '    """',
+    '    src_root = os.environ.get("AEROKEY_MIPMAP_DIR")',
+    '    if not src_root:',
+    '        return False',
+    '',
+    '    if not os.path.isdir(src_root):',
+    '        _aerokey_step("hazir ikon klasoru yok: " + src_root)',
+    '        return False',
+    '',
+    '    densities = ["mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"]',
+    '    names = ["icon_background", "icon_foreground", "icon"]',
+    '',
+    '    # Once EKSIKSIZ mi diye bakiyoruz. Yarim kopyalanmis bir kume, hic',
+    '    # kopyalanmamis olmaktan daha kotudur: manifest @mipmap/icon diyor,',
+    "    # adaptif ikon XML'i de arka/on plani istiyor. Eksik kaynak Gradle'i",
+    '    # anlasilmasi zor bir hatayla dusururdu.',
+    '    planned = []',
+    '    for dpi in densities:',
+    '        for name in names:',
+    '            src = os.path.join(src_root, "mipmap-" + dpi, name + ".png")',
+    '            if not os.path.isfile(src):',
+    '                _aerokey_step(',
+    '                    "hazir ikon eksik (" + src + "), IconMaker\'a donuluyor")',
+    '                return False',
+    '            dst = plat.path(',
+    '                "project/app/src/main/res/mipmap-" + dpi + "/" + name + ".png")',
+    '            planned.append((src, dst))',
+    '',
+    '    try:',
+    '        for src, dst in planned:',
+    '            dst_dir = os.path.dirname(dst)',
+    '            if not os.path.isdir(dst_dir):',
+    '                os.makedirs(dst_dir)',
+    '            shutil.copyfile(src, dst)',
+    '    except (IOError, OSError) as e:',
+    '        _aerokey_step("hazir ikon kopyalanamadi (" + str(e) + ")")',
+    '        return False',
+    '',
+    '    _aerokey_step(',
+    '        "ikonlar hazir dosyalardan kuruldu: " + str(len(planned))',
+    '        + " dosya (pygame HIC calistirilmadi)")',
+    '    return True',
+    '',
+    '',
     '# --- AEROKEY-BUILD END --------------------------------------------------',
 ])
 
-_BUILD_TAR_PATCH = _build_stamp([
-    '    # --- AEROKEY-TAR BEGIN (surum #) -----------------------------------',
-    "    # Bu blok Ren'Py Android Paketleyici tarafindan uretildi.",
-    '    # BEGIN/END arasi her yamada tamamen yenilenir.',
-    '    #',
-    '    # ESKI HALI:',
-    '    #     make_tar(iface, private_mp3, private_dirs)',
-    '    #',
-    '    #     with open(private_mp3, "rb") as f:',
-    '    #         private_version = hashlib.md5(f.read()).hexdigest()',
-    '    #',
-    '    # f.read() dosyanin TAMAMINI tek seferde bellege aliyordu. private.mp3',
-    '    # motorun ve dort Android mimarisi icin native kutuphanelerin tar.gz',
-    '    # arsividir; yuzlerce MB olabilir. Bellek siniri dusuk bir konteynerde',
-    "    # bu tek satir OOM-killer'i tetikler: surec SIGKILL ile oldurulur,",
-    '    # Python tarafinda hicbir iz kalmaz ve renutil bunu yalnizca',
-    '    # "Unable to launch Ren\'Py: Status 1" diye bildirir.',
-    '    #',
-    '    # Parca parca okumak AYNI md5 degerini uretir (ozet fonksiyonu',
-    "    # birikimlidir); yalnizca tepe bellek kullanimi 4 MB'a sabitlenir.",
-    '    _aerokey_step("private.mp3 arsivi olusturuluyor")',
-    '    make_tar(iface, private_mp3, private_dirs)',
-    '',
-    '    _aerokey_step("private.mp3 ozeti (md5) hesaplaniyor")',
-    '',
-    '    _aerokey_md5 = hashlib.md5()',
-    '    with open(private_mp3, "rb") as f:',
-    '        while True:',
-    '            _aerokey_chunk = f.read(4 * 1024 * 1024)',
-    '            if not _aerokey_chunk:',
-    '                break',
-    '            _aerokey_md5.update(_aerokey_chunk)',
-    '',
-    '    private_version = _aerokey_md5.hexdigest()',
-    '',
-    '    _aerokey_step("sablonlar isleniyor (build.gradle, AndroidManifest.xml)")',
-    '    # --- AEROKEY-TAR END ------------------------------------------------',
-])
 
-_BUILD_ICON_PATCH = _build_stamp([
-    '    # --- AEROKEY-ICON BEGIN (surum #) ----------------------------------',
-    "    # Bu blok Ren'Py Android Paketleyici tarafindan uretildi.",
-    '    # BEGIN/END arasi her yamada tamamen yenilenir.',
-    '    #',
-    '    # ESKI HALI:',
-    '    #     if config.update_icons:',
-    '    #         iconmaker.IconMaker(directory, config)',
-    '    #',
-    '    # IconMaker, projenin ikon dosyalarini pygame ile ACAR ve olceklendirir',
-    '    # (pygame.image.load + convert_alpha + smoothscale). Bunlar yerel kod',
-    '    # cagrilaridir; bozuk ya da asiri buyuk bir goruntude iz birakmadan',
-    '    # cokebilirler. Mantik degistirilmedi, yalnizca isaretlendi: girdiyi',
-    '    # guvenli hale getirme isi paketleyici tarafinda yapiliyor',
-    "    # (app.py, _prepare_android_icon -> her ikon 432x432 PNG'ye yeniden",
-    '    # kodlanir).',
-    '    _aerokey_step("uygulama ikonu uretiliyor")',
-    '    if config.update_icons:',
-    '        iconmaker.IconMaker(directory, config)',
-    '',
-    '    _aerokey_step("acilis gorselleri (presplash) kopyalaniyor")',
-    '    # --- AEROKEY-ICON END -----------------------------------------------',
-])
+# Gomulecek bloklar. Her biri BAGIMSIZDIR: tutunma noktasi bulunamayan
+# blok atlanir, otekiler yine de uygulanir. Boylece Ren'Py tek bir satiri
+# degistirdiginde yamanin tamami bir anda islevsiz kalmaz.
+#
+# Bicim: (etiket, aciklama, anchor, yama metni)
+_BUILD_BLOCKS = (
+    (
+        'JAVA',
+        'JDK denetimi',
+        '    install_sdk.check_java(iface)\n',
+        _build_stamp([
+            '    # --- AEROKEY-JAVA BEGIN (surum #) ------------------------------------------------',
+            '    _aerokey_step("JDK surumu denetleniyor")',
+            '    install_sdk.check_java(iface)',
+            '    _aerokey_step("JDK tamam, proje yapilandirmasi okunuyor")',
+            '    # --- AEROKEY-JAVA END ----------------------------------------------------',
+        ]),
+    ),
+    (
+        'SPLIT',
+        'private/assets ayrimi',
+        '    private_dir, assets_dir = split_renpy(directory)\n',
+        _build_stamp([
+            '    # --- AEROKEY-SPLIT BEGIN (surum #) -----------------------------------------------',
+            '    # split_renpy motoru ve oyun dosyalarini private/ ile assets/',
+            '    # arasinda tasir. Buyuk oyunlarda binlerce dosya hareket eder.',
+            '    _aerokey_step("proje private/assets olarak ayriliyor")',
+            '    private_dir, assets_dir = split_renpy(directory)',
+            '    _aerokey_step("ayirma tamamlandi")',
+            '    # --- AEROKEY-SPLIT END ---------------------------------------------------',
+        ]),
+    ),
+    (
+        'PROJECT',
+        'proje sablonu + native kutuphaneler',
+        '    copy_project(config.update_always)\n\n    copy_libs()\n',
+        _build_stamp([
+            '    # --- AEROKEY-PROJECT BEGIN (surum #) ---------------------------------------------',
+            '    _aerokey_step("Android proje sablonu kopyalaniyor")',
+            '    copy_project(config.update_always)',
+            '',
+            '    _aerokey_step("native kutuphaneler kopyalaniyor (4 mimari)")',
+            '    copy_libs()',
+            '    _aerokey_step("kutuphaneler yerinde")',
+            '    # --- AEROKEY-PROJECT END -------------------------------------------------',
+        ]),
+    ),
+    (
+        'ASSETS',
+        'varlik agaci',
+        '    iface.background(make_assets)\n',
+        _build_stamp([
+            '    # --- AEROKEY-ASSETS BEGIN (surum #) ----------------------------------------------',
+            '    # make_assets tum oyun agacini kopyalar ve her dosyayi "x-" oneki',
+            "    # ile yeniden adlandirir. 800 MB'lik bir oyunda bu adim dakikalar",
+            '    # surebilir ve en yogun disk kullanimi buradadir.',
+            '    _aerokey_step("varlik agaci kopyalaniyor ve yeniden adlandiriliyor")',
+            '    iface.background(make_assets)',
+            '    _aerokey_step("varlik agaci hazir")',
+            '    # --- AEROKEY-ASSETS END --------------------------------------------------',
+        ]),
+    ),
+    (
+        'TAR',
+        'private.mp3 arsivi + md5',
+        '    make_tar(iface, private_mp3, private_dirs)\n\n    with open(private_mp3, "rb") as f:\n        private_version = hashlib.md5(f.read()).hexdigest()\n',
+        _build_stamp([
+            '    # --- AEROKEY-TAR BEGIN (surum #) -------------------------------------------------',
+            '    # ESKI HALI:',
+            '    #     with open(private_mp3, "rb") as f:',
+            '    #         private_version = hashlib.md5(f.read()).hexdigest()',
+            '    #',
+            '    # f.read() dosyanin TAMAMINI tek seferde bellege aliyordu.',
+            '    # private.mp3 motorun ve dort Android mimarisi icin native',
+            '    # kutuphanelerin tar.gz arsividir; yuzlerce MB olabilir. Bellek',
+            "    # siniri dusuk bir konteynerde bu tek satir OOM-killer'i tetikler.",
+            '    #',
+            '    # Parca parca okumak AYNI md5 degerini uretir (ozet fonksiyonu',
+            "    # birikimlidir); yalnizca tepe bellek 4 MB'a sabitlenir.",
+            '    _aerokey_step("private.mp3 arsivi olusturuluyor")',
+            '    make_tar(iface, private_mp3, private_dirs)',
+            '',
+            '    _aerokey_step("private.mp3 ozeti (md5) hesaplaniyor")',
+            '',
+            '    _aerokey_md5 = hashlib.md5()',
+            '    with open(private_mp3, "rb") as f:',
+            '        while True:',
+            '            _aerokey_chunk = f.read(4 * 1024 * 1024)',
+            '            if not _aerokey_chunk:',
+            '                break',
+            '            _aerokey_md5.update(_aerokey_chunk)',
+            '',
+            '    private_version = _aerokey_md5.hexdigest()',
+            '',
+            '    _aerokey_step("sablonlar isleniyor (build.gradle, AndroidManifest.xml)")',
+            '    # --- AEROKEY-TAR END -----------------------------------------------------',
+        ]),
+    ),
+    (
+        'ICON',
+        'ikon uretimi',
+        '    if config.update_icons:\n        iconmaker.IconMaker(directory, config)\n',
+        _build_stamp([
+            '    # --- AEROKEY-ICON BEGIN (surum #) ------------------------------------------------',
+            '    # ESKI HALI:',
+            '    #     if config.update_icons:',
+            '    #         iconmaker.IconMaker(directory, config)',
+            '    #',
+            '    # IconMaker ikonlari pygame ile uretir: image.load + convert_alpha',
+            '    # + smoothscale + BLEND_RGBA_MULT. Hepsi YEREL koddur ve yerel kod',
+            '    # coktugunde Python tarafinda iz kalmaz; surec dogrudan bir',
+            '    # sinyalle olur ve TUM derleme gider.',
+            '    #',
+            '    # Artik ayni ikonlari paketleyici derlemeden ONCE, kendi surecinde,',
+            '    # Pillow ile uretiyor (aerokey/icons.py). Burada yalnizca dosya',
+            '    # kopyalaniyor, yani pygame hic calistirilmiyor.',
+            '    #',
+            '    # Hazir dosyalar yoksa davranis DEGISMEZ: IconMaker eskisi gibi',
+            '    # calisir. Yani bu yama hicbir seyi bozmaz.',
+            '    _aerokey_step("uygulama ikonu")',
+            '    if config.update_icons:',
+            '        if not _aerokey_install_icons():',
+            '            _aerokey_step(',
+            '                "hazir ikon yok; RAPT IconMaker calisiyor (pygame, riskli yol)")',
+            '            iconmaker.IconMaker(directory, config)',
+            '    else:',
+            '        _aerokey_step("ikon guncelleme kapali, atlandi")',
+            '',
+            '    _aerokey_step("acilis gorselleri (presplash) kopyalaniyor")',
+            '    # --- AEROKEY-ICON END ----------------------------------------------------',
+        ]),
+    ),
+    (
+        'GRADLE',
+        'Gradle cagrisi',
+        '        iface.call([ plat.gradlew, "-p", plat.path("project"), command ], cancel=True)\n',
+        _build_stamp([
+            '        # --- AEROKEY-GRADLE BEGIN (surum #) ----------------------------------------------',
+            '        _aerokey_step("Gradle baslatiliyor: " + command)',
+            '        iface.call([ plat.gradlew, "-p", plat.path("project"), command ], cancel=True)',
+            '        _aerokey_step("Gradle tamamlandi")',
+            '        # --- AEROKEY-GRADLE END --------------------------------------------------',
+        ]),
+    ),
+)
 
 
 def rapt_build_file(sdk: Path) -> Optional[Path]:
@@ -1462,24 +1592,25 @@ def rapt_build_file(sdk: Path) -> Optional[Path]:
 
 def patch_rapt_build(sdk: Path) -> bool:
     """
-    RAPT'in paketleme adimini iki bakimdan saglamlastirir:
+    RAPT'in paketleme adimini uc bakimdan saglamlastirir:
 
-      1. private.mp3 ozeti artik parca parca hesaplaniyor. Eskiden dosyanin
-         tamami tek seferde bellege aliniyordu ve bu, bellek siniri dusuk
-         bir konteynerde surecin sessizce oldurulmesine yol aciyordu.
-      2. Paketleme asamasinin alt adimlari gunluge isaretleniyor. O asamada
-         bir sinyal olumu olursa Python yigin izi olusmadigi icin eskiden
-         hangi adimda olundugu hic bilinemiyordu.
+      1. private.mp3 ozeti parca parca hesaplaniyor. Eskiden dosyanin
+         tamami tek seferde bellege aliniyordu.
+      2. Ikonlar pygame yerine hazir dosyalardan kuruluyor. Ikon uretimi
+         yerel kod cagrilariyla doluydu ve orada bir cokme TUM derlemeyi
+         iz birakmadan oldururdu.
+      3. Her adim zaman + bellek ile gunluge yaziliyor, boylece bir daha
+         olursa nerede olundugu dogrudan okunuyor.
 
     Doner: dosya bu cagrida degistirildi mi.
 
-    BU YAMA OLUMCUL DEGILDIR. Tutunma noktalari bulunamazsa uyari basar ve
-    False doner; derleme normal sekilde surer. Gerekce: bu bir
-    SAGLAMLASTIRMA yamasi, bir zorunluluk degil. Ren'Py bir gun bu
-    satirlari degistirirse derlemeyi tumden kirmak, yamanin onlemeye
-    calistigi zarardan daha buyuk olurdu. (Karsilastirma: manifest yamasi
-    OLUMCULDUR, cunku sessizce atlanirsa lisans ekrani olmayan bir APK
-    uretilir ve bu ancak oyun acildiginda fark edilir.)
+    BU YAMA OLUMCUL DEGILDIR. Yardimci blogun tutunma noktasi bulunamazsa
+    hicbir sey yazilmaz; tek tek bloklarin noktalari bulunamazsa yalnizca
+    o bloklar atlanir. Her iki durumda da derleme normal sekilde surer.
+    Gerekce: bu bir SAGLAMLASTIRMA yamasi. Ren'Py bir gun bu satirlari
+    degistirirse derlemeyi tumden kirmak, yamanin onlemeye calistigi
+    zarardan daha buyuk olurdu. (Karsilastirma: manifest yamasi OLUMCULDUR,
+    cunku sessizce atlanirsa lisans ekrani olmayan bir APK uretilir.)
     """
     target = rapt_build_file(sdk)
 
@@ -1500,33 +1631,21 @@ def patch_rapt_build(sdk: Path) -> bool:
               + str(_BUILD_PATCH_VERSION) + "): " + str(target))
         return False
 
-    # Eski surumden kalan bloklari once sok ve ozgun satirlari geri koy.
-    text = _BUILD_HELPER_RE.sub("", text)
-    text, removed_tar = _BUILD_TAR_RE.subn(_BUILD_TAR_ANCHOR, text)
-    text, removed_icon = _BUILD_ICON_RE.subn(_BUILD_ICON_ANCHOR, text)
-    removed = bool(removed_tar or removed_icon)
+    # Onceki surumlerden kalan bloklari sok ve ozgun satirlari geri koy.
+    text, removed = _BUILD_HELPER_RE.subn("", text)
+    for tag, _desc, anchor, _patch in _BUILD_BLOCKS:
+        text, n = _block_re(tag).subn(anchor, text)
+        removed += n
 
-    missing = [
-        label
-        for label, anchor in (
-            ("PatternList sinifi", _BUILD_HELPER_ANCHOR),
-            ("make_tar/md5 blogu", _BUILD_TAR_ANCHOR),
-            ("ikon blogu", _BUILD_ICON_ANCHOR),
-        )
-        if anchor not in text
-    ]
-
-    if missing:
-        # Hicbir sey yazmadan cikiyoruz: yarim uygulanmis bir yama, hic
-        # uygulanmamis olmaktan daha kotudur.
+    if _BUILD_HELPER_ANCHOR not in text:
+        # Yardimci blok olmadan adim isaretcileri tanimsiz kalir ve
+        # build.py NameError verirdi. Hicbir sey yazmiyoruz.
         print(
-            "[aerokey] UYARI: paketleme yamasi uygulanmadi, beklenen "
-            "satirlar bulunamadi (" + ", ".join(missing) + "). "
-            "Ren'Py surumu degismis olabilir; derleme normal sekilde "
-            "surecek: " + str(target),
+            "[aerokey] UYARI: paketleme yamasi uygulanmadi, "
+            "PatternList sinifi bulunamadi. Ren'Py surumu degismis "
+            "olabilir; derleme normal sekilde surecek: " + str(target),
             file=sys.stderr,
         )
-        # Sokme islemi yapilmissa dosyayi ozgun haliyle geri yaziyoruz.
         if text != original:
             write(target, text)
         return False
@@ -1536,8 +1655,15 @@ def patch_rapt_build(sdk: Path) -> bool:
         _BUILD_HELPER_PATCH + "\n\n" + _BUILD_HELPER_ANCHOR,
         1,
     )
-    text = text.replace(_BUILD_TAR_ANCHOR, _BUILD_TAR_PATCH, 1)
-    text = text.replace(_BUILD_ICON_ANCHOR, _BUILD_ICON_PATCH, 1)
+
+    uygulanan = []
+    eksik = []
+    for tag, desc, anchor, patch in _BUILD_BLOCKS:
+        if anchor in text:
+            text = text.replace(anchor, patch, 1)
+            uygulanan.append(desc)
+        else:
+            eksik.append(desc)
 
     write(target, text)
 
@@ -1551,12 +1677,16 @@ def patch_rapt_build(sdk: Path) -> bool:
             except OSError:
                 pass
 
-    if removed:
-        print("[aerokey] Paketleme yamasi surum "
-              + str(_BUILD_PATCH_VERSION) + " olarak yenilendi: " + str(target))
-    else:
-        print("[aerokey] Paketleme yamasi uygulandi (surum "
-              + str(_BUILD_PATCH_VERSION) + "): " + str(target))
+    durum = "yenilendi" if removed else "uygulandi"
+    print("[aerokey] Paketleme yamasi " + durum + " (surum "
+          + str(_BUILD_PATCH_VERSION) + ", " + str(len(uygulanan))
+          + "/" + str(len(_BUILD_BLOCKS)) + " blok): " + str(target))
+    if eksik:
+        print(
+            "[aerokey] UYARI: su bloklar uygulanamadi (tutunma noktasi "
+            "bulunamadi): " + ", ".join(eksik),
+            file=sys.stderr,
+        )
 
     return True
 

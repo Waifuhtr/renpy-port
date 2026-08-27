@@ -49,6 +49,7 @@ from aerokey import rpa as rpa_archive  # noqa: E402
 from aerokey import display as virtual_display  # noqa: E402
 from aerokey import build_dump  # noqa: E402
 from aerokey import resources  # noqa: E402
+from aerokey import icons  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
@@ -1009,20 +1010,42 @@ def _looks_like_headless_failure(log: str) -> Optional[str]:
     return None
 
 
-# RAPT'ın Android paketleme aşamasının adımları, GERÇEKLEŞME SIRASIYLA.
-# Kaynak: rapt/buildlib/rapt/build.py -> build(). "[aerokey] adim:" ile
-# başlayanlar bizim enjekte ettiğimiz ara işaretçilerdir; ötekiler RAPT'ın
-# kendi mesajları.
+# RAPT'ın Android derlemesinin adımları, GERÇEKLEŞME SIRASIYLA.
+# Kaynak: rapt/buildlib/rapt/build.py -> build(). "[aerokey]" ile
+# başlayanlar bizim enjekte ettiğimiz ara işaretçilerdir (bkz.
+# patch_rapt.patch_rapt_build); ötekiler RAPT'ın kendi mesajları.
+#
+# Bu liste, iz bırakmadan ölen bir süreçte elimizdeki TEK ipucudur:
+# yığın izi oluşmadığı için "nereye kadar geldi" sorusunun cevabı
+# yalnızca günlüğe en son yazılan satırdır.
 _RAPT_STEPS = (
-    ("Updating project.", "proje güncelleniyor"),
-    ("Creating assets directory.", "varlık (assets) klasörü oluşturuluyor"),
-    ("Packaging internal data.", "iç veriler paketleniyor"),
-    ("[aerokey] adim: private.mp3 arsivi", "private.mp3 arşivi oluşturuluyor"),
-    ("[aerokey] adim: private.mp3 ozeti", "private.mp3 özeti (md5) hesaplanıyor"),
-    ("[aerokey] adim: sablonlar", "şablonlar işleniyor"),
-    ("[aerokey] adim: uygulama ikonu", "uygulama ikonu üretiliyor"),
-    ("[aerokey] adim: acilis gorselleri", "açılış görselleri kopyalanıyor"),
-    ("I'm using Gradle to build the package.", "Gradle derlemeyi yürütüyor"),
+    ("[aerokey] ", "JDK surumu denetleniyor", "JDK sürümü denetleniyor"),
+    ("[aerokey] ", "proje yapilandirmasi okunuyor", "proje yapılandırması okunuyor"),
+    ("[aerokey] ", "private/assets olarak ayriliyor",
+     "proje private/assets olarak ayrılıyor"),
+    ("[aerokey] ", "ayirma tamamlandi", "private/assets ayrımı tamamlandı"),
+    ("", "Updating project.", "proje güncelleniyor"),
+    ("[aerokey] ", "proje sablonu kopyalaniyor", "Android proje şablonu kopyalanıyor"),
+    ("[aerokey] ", "native kutuphaneler kopyalaniyor",
+     "native kütüphaneler kopyalanıyor (4 mimari)"),
+    ("[aerokey] ", "kutuphaneler yerinde", "kütüphaneler yerinde"),
+    ("", "Creating assets directory.", "varlık (assets) klasörü oluşturuluyor"),
+    ("[aerokey] ", "varlik agaci kopyalaniyor",
+     "varlık ağacı kopyalanıyor ve yeniden adlandırılıyor"),
+    ("[aerokey] ", "varlik agaci hazir", "varlık ağacı hazır"),
+    ("", "Packaging internal data.", "iç veriler paketleniyor"),
+    ("[aerokey] ", "private.mp3 arsivi", "private.mp3 arşivi oluşturuluyor"),
+    ("[aerokey] ", "private.mp3 ozeti", "private.mp3 özeti (md5) hesaplanıyor"),
+    ("[aerokey] ", "sablonlar isleniyor", "şablonlar işleniyor"),
+    ("[aerokey] ", "uygulama ikonu", "uygulama ikonu"),
+    ("[aerokey] ", "ikonlar hazir dosyalardan kuruldu",
+     "ikonlar hazır dosyalardan kuruldu (pygame çalıştırılmadı)"),
+    ("[aerokey] ", "RAPT IconMaker calisiyor",
+     "RAPT'ın kendi IconMaker'ı çalışıyor (pygame — riskli yol)"),
+    ("[aerokey] ", "acilis gorselleri", "açılış görselleri kopyalanıyor"),
+    ("", "I'm using Gradle to build the package.", "Gradle aşamasına geçiliyor"),
+    ("[aerokey] ", "Gradle baslatiliyor", "Gradle derlemeyi yürütüyor"),
+    ("[aerokey] ", "Gradle tamamlandi", "Gradle tamamlandı"),
 )
 
 # renutil, alt süreç bir SİNYALLE öldüğünde (SIGKILL/SIGSEGV) çıkış kodu
@@ -1035,18 +1058,41 @@ _RENUTIL_STATUS_RE = re.compile(r"Unable to launch Ren'Py: Status (-?\d+)")
 
 def _last_build_step(log: str) -> Optional[str]:
     """
-    Paketleme sırasında ulaşılan SON adımı döner.
+    Derleme sırasında ulaşılan SON adımı döner.
 
     Bir sinyal ölümünde Python yığın izi oluşmaz; elimizdeki tek ipucu,
     günlüğe en son hangi adımın yazıldığıdır.
     """
     son = None
     son_konum = -1
-    for marker, label in _RAPT_STEPS:
+    for _onek, marker, label in _RAPT_STEPS:
         konum = log.rfind(marker)
         if konum > son_konum:
             son_konum, son = konum, label
     return son
+
+
+def _build_step_trail(log: str, limit: int = 6) -> list:
+    """
+    Ulaşılan son birkaç adımı SIRASIYLA döner.
+
+    Tek bir "son adım" bazen yanıltıcı olur: asıl bilgi, sürecin hangi
+    aşamaları geçip nerede takıldığıdır. Bu iz, hata mesajında okuyucuya
+    derlemenin gidişatını gösteriyor.
+    """
+    gorulen = []
+    for _onek, marker, label in _RAPT_STEPS:
+        konum = log.rfind(marker)
+        if konum >= 0:
+            gorulen.append((konum, label))
+
+    gorulen.sort()
+    # Aynı etiket art arda tekrarlanırsa bir kez göster.
+    iz = []
+    for _konum, label in gorulen:
+        if not iz or iz[-1] != label:
+            iz.append(label)
+    return iz[-limit:]
 
 
 def _looks_like_silent_death(log: str) -> Optional[str]:
@@ -2021,6 +2067,40 @@ def _execute_build(
     ]
     config_path.write_text("\n".join(toml_lines) + "\n", encoding="utf-8")
 
+    # --- Android ikonları (mipmap) ---------------------------------------
+    # RAPT bu ikonları normalde pygame ile üretir (image.load, convert_alpha,
+    # smoothscale, BLEND_RGBA_MULT — hepsi yerel kod). Yerel kod çöktüğünde
+    # süreç iz bırakmadan ölür ve TÜM derleme gider; kullanıcının derlemesi
+    # tam olarak orada ölüyordu. Aynı ikonları burada, kendi sürecimizde,
+    # Pillow ile üretiyoruz; RAPT tarafındaki yama hazır dosyaları bulunca
+    # o kod yolunu hiç çalıştırmıyor.
+    mipmap_dir = job_dir / "mipmap"
+    templates_dir = None
+    if _sdk_list:
+        candidate = _sdk_list[0] / "rapt" / "templates"
+        if candidate.is_dir():
+            templates_dir = candidate
+
+    icon_result = icons.generate_mipmaps(project_root, templates_dir, mipmap_dir)
+    if icon_result.ok:
+        kaynaklar = "\n".join(
+            f"    - {ad}: {yol}" for ad, yol in icon_result.sources.items()
+        )
+        job.log(
+            f"\nUygulama ikonları hazırlandı ({icon_result.written} dosya, "
+            "5 yoğunluk × 3 katman).\n"
+            f"{kaynaklar}\n"
+            "  Bu sayede Ren'Py ikonları pygame ile üretmek zorunda kalmıyor "
+            "(yerel kod çökmesi riski olan adım atlanıyor)."
+        )
+    else:
+        mipmap_dir = None
+        job.log(
+            f"\nUyarı: uygulama ikonları hazırlanamadı ({icon_result.note}).\n"
+            "  Ren'Py bunları kendisi üretecek (pygame ile). Derleme devam "
+            "ediyor; bu adım daha önce çökmelere yol açmıştı."
+        )
+
     # --- Derleme meta verisi (navigation.json) ---------------------------
     # Ren'Py normalde bu veriyi toplamak için oyunu bir alt süreçte AÇIP
     # kapatır; o alt süreç oyunun kendi init python bloklarını çalıştırır ve
@@ -2075,12 +2155,20 @@ def _execute_build(
         str(project_root), str(out_dir),
     ]
 
+    # Hazır ikonların yerini alt sürece bildiriyoruz. Zincir uzun
+    # (renconstruct -> renutil -> Ren'Py Launcher -> RAPT) ama her halka
+    # ortamı olduğu gibi devrediyor; RENPY_NO_STEAM'in aynı yoldan
+    # ulaştığını daha önce doğrulamıştık.
+    build_env = dict(os.environ)
+    if mipmap_dir is not None:
+        build_env["AEROKEY_MIPMAP_DIR"] = str(mipmap_dir)
+
     # --- Derleme + ağ hatalarında otomatik yeniden deneme -----------------
     max_attempts = 3
     return_code = None
     for attempt in range(1, max_attempts + 1):
         marker = len(job.lines)
-        return_code = _stream_subprocess(cmd, job)
+        return_code = _stream_subprocess(cmd, job, env=build_env)
         if return_code == 0:
             break
 
@@ -2161,25 +2249,44 @@ def _execute_build(
             # renutil'in sinyal ölümünde bastığı yedek değerdir.
             signature = _looks_like_silent_death(full_log)
             step = _last_build_step(full_log)
-            step_text = (
-                f"Ulaşılan son adım: {step}.\n" if step
-                else "Günlükte adım işaretçisi bulunamadı.\n"
-            )
+            iz = _build_step_trail(full_log)
+
+            if iz:
+                iz_text = "Derlemenin ilerleyişi (son adımlar):\n" + "\n".join(
+                    f"  {'✓' if label != step else '✗'} {label}" for label in iz
+                ) + "\n"
+            else:
+                iz_text = (
+                    "Günlükte hiçbir adım işaretçisi yok — süreç, RAPT'ın "
+                    "derleme aşamasına HİÇ ulaşamadan ölmüş olabilir.\n"
+                )
+
+            # Bellek gerçekten dar mıydı? Bunu söylemek, kullanıcıyı boş
+            # yere donanım yükseltmeye yönlendirmemek için önemli.
+            mem = resources.memory_status()
+            if mem.available is not None and mem.available > 4 * 1024 ** 3:
+                bellek_yorumu = (
+                    f"Bellek BOL idi ({resources.human(mem.available)} boş), "
+                    "yani sebep bellek yetersizliği DEĞİL. Geriye yerel "
+                    "(native) bir kütüphane çökmesi kalıyor."
+                )
+            else:
+                bellek_yorumu = (
+                    "Bellek dardı; en olası sebep OOM-killer'ın süreci "
+                    "öldürmesi."
+                )
+
             job.log(
                 f"\nDerleme HATA ile sonuçlandı (kod {return_code}).\n"
-                f"Sebep: alt süreç, hata vermeden ÖLDÜRÜLDÜ ({signature!r}).\n"
-                f"{step_text}"
+                f"Sebep: alt süreç, hata vermeden ÖLDÜRÜLDÜ ({signature!r}).\n\n"
+                f"{iz_text}\n"
                 "Günlükte hiçbir Python yığın izi yok. Bu, sürecin bir "
                 "istisna fırlatarak değil, doğrudan bir SİNYALLE "
-                "sonlandırıldığı anlamına gelir. İki tipik sebebi vardır:\n"
-                "  1. BELLEK yetersizliği — çekirdeğin OOM-killer'ı süreci "
-                "sessizce öldürür.\n"
-                "  2. Yerel (native) bir kütüphanenin çökmesi (görüntü "
-                "çözücü, ses aygıtı, yazı tipi…).\n"
-                f"Derleme başlarkenki kaynak durumu: {resource_note}\n"
-                "Space'inizde kalıcı disk/bellek yükseltmesi mümkünse "
-                "denemeye değer; bellek darsa aynı proje daha boş bir anda "
-                "sorunsuz derlenebilir."
+                "sonlandırıldığı anlamına gelir (SIGKILL ya da SIGSEGV).\n"
+                f"{bellek_yorumu}\n"
+                f"Derleme başlarkenki kaynak durumu: {resource_note}\n\n"
+                "Bu çıktıyı geliştiriciye iletirseniz, yukarıdaki adım izi "
+                "sorunun yerini nokta atışı gösterir."
             )
         else:
             root_cause = _find_likely_root_cause(full_log)

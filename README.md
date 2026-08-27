@@ -832,18 +832,55 @@ olabilir. Bu satır dosyanın **tamamını tek seferde belleğe** alır. Bellek
 sınırı dar bir konteynerde OOM-killer devreye girer.
 
 **İkinci sebep — `IconMaker`.** Projenin ikon dosyalarını `pygame` ile
-açıp ölçekler (`image.load` + `convert_alpha` + `smoothscale`) — hepsi
-yerel kod. Bozuk veya olağandışı büyük bir görüntü burada iz bırakmadan
-çökebilir.
+açıp ölçekler (`image.load` + `convert_alpha` + `smoothscale` +
+`BLEND_RGBA_MULT`) — hepsi yerel kod. Yerel kod çöktüğünde Python
+tarafında iz kalmaz ve bu adım tüm derlemeyle **aynı süreçte** çalıştığı
+için koca derleme gider.
 
-### Çözüm
+**Ölçülen gerçek:** kullanıcının 32 GB RAM'li Space'inde derleme tam bu
+adımda öldü ve boş bellek 25.9 GB'tı. Yani bellek **sebep değildi** —
+suçlu ikon üretimindeki yerel kod yolu.
+
+### Çözüm: ikonları pygame'e hiç ürettirmemek
+
+Aynı ikonlar artık derlemeden **önce**, paketleyicinin kendi sürecinde,
+Pillow ile üretiliyor (`aerokey/icons.py`). RAPT tarafındaki yama hazır
+dosyaları bulunca `IconMaker`'ı hiç çağırmıyor — o kod yolu
+çalıştırılmıyor.
+
+Neden Pillow orada değil de burada: Ren'Py'nin gömülü python'unda **PIL
+kurulu değil** (doğrulandı). Bu yüzden üretimi biz yapıp RAPT'a yalnızca
+dosya kopyalatıyoruz.
+
+Üretilen 15 dosya (5 yoğunluk × 3 katman) zorunludur: manifest
+`@mipmap/icon` diyor, `mipmap-anydpi-v26/icon.xml` de arka/ön planı
+istiyor. RAPT'ın prototip ağacında bunların hazır kopyası yoktur.
 
 | Ne | Nasıl |
 |---|---|
-| Bellek tepesi | `md5` artık 4 MB'lık parçalar hâlinde hesaplanıyor. Aynı özet, sabit bellek. |
-| İkon girdisi | Her ikon katmanı artık **bizim tarafımızda** 432×432 RGBA PNG'ye yeniden kodlanıyor — proje kendi ikonunu sağlasa bile. |
-| Görünürlük | Paketleme aşamasının alt adımları günlüğe işaretleniyor. |
+| İkon üretimi | pygame yerine Pillow, derlemeden önce, ayrı süreçte. |
+| Bellek tepesi | `md5` artık 4 MB'lık parçalar hâlinde. Aynı özet, sabit bellek. |
+| İkon girdisi | Her katman 432×432 RGBA PNG'ye yeniden kodlanıyor — proje kendi ikonunu sağlasa bile. |
+| Görünürlük | Derlemenin **her** adımı süre + bellek ile günlükte. |
 | Ön bilgi | Derleme başlarken bellek/disk durumu günlüğe yazılıyor. |
+
+> Hazır dosyalar eksikse davranış **değişmez**: `IconMaker` eskisi gibi
+> çalışır. Yarım bir küme asla kabul edilmez — 15 dosyanın biri bile
+> eksikse tamamı reddedilip eski yola dönülür, çünkü eksik kaynak
+> Gradle'ı anlaşılması zor bir hatayla düşürürdü.
+
+**Doğrulama.** Üretilen ikonlar gerçek `pygame` çıktısıyla karşılaştırıldı
+(gerçek SDK + Xvfb ile üretilen referans):
+
+| Girdi | Görünen ortalama fark |
+|---|---|
+| Gerçek üretim yolu (bizim ikon hattımız) | **%1.6** (arka planlar piksel-birebir) |
+| RAPT'ın kendi varsayılan ikonları | %1.2 |
+
+Bit düzeyinde aynı olamaz — `pygame`'in `smoothscale`'i ile Pillow'un
+süzgeci farklı uygulamalardır (pygame nokta örnekler, Pillow alan
+ortalaması alır; ikincisi kenar kırılmasını daha iyi önler). Boyutların
+tamamı RAPT'la birebir aynıdır.
 
 Ölçüm (300 MB'lik bir `private.mp3` ile, `tracemalloc`):
 
@@ -855,18 +892,47 @@ yerel kod. Bozuk veya olağandışı büyük bir görüntü burada iz bırakmada
 Üretilen `md5` **birebir aynı** — özet fonksiyonu birikimli olduğu için
 parçalı beslemek sonucu değiştirmez.
 
-Günlükte artık şunları görürsünüz:
+### Ayrıntılı derleme günlüğü
+
+Derlemenin **her** adımı, geçen süre ve o andaki boş bellekle işaretleniyor:
 
 ```
-Kaynak durumu: bellek 1.4 GB boş / 2.0 GB (cgroup v2), disk(/tmp) 12.1 GB boş
-...
-[aerokey] adim: private.mp3 arsivi olusturuluyor | bos bellek: 1.20 GB
-[aerokey] adim: private.mp3 ozeti (md5) hesaplaniyor | bos bellek: 1.18 GB
-[aerokey] adim: sablonlar isleniyor | bos bellek: 1.18 GB
-[aerokey] adim: uygulama ikonu uretiliyor | bos bellek: 1.17 GB
+Kaynak durumu: bellek 25.9 GB boş / 29.8 GB (cgroup v2), disk 328.8 GB boş
+
+[aerokey]     0.3s | bellek:  25.94 GB bos | JDK surumu denetleniyor
+[aerokey]     2.0s | bellek:  25.93 GB bos | proje private/assets olarak ayriliyor
+[aerokey]    14.2s | bellek:  25.90 GB bos | ayirma tamamlandi
+[aerokey]    14.3s | bellek:  25.90 GB bos | Android proje sablonu kopyalaniyor
+[aerokey]    18.7s | bellek:  25.88 GB bos | native kutuphaneler kopyalaniyor (4 mimari)
+[aerokey]    22.2s | bellek:  25.88 GB bos | varlik agaci kopyalaniyor ve yeniden adlandiriliyor
+[aerokey]   131.9s | bellek:  25.51 GB bos | varlik agaci hazir
+[aerokey]   132.0s | bellek:  25.51 GB bos | private.mp3 arsivi olusturuluyor
+[aerokey]   180.4s | bellek:  25.49 GB bos | private.mp3 ozeti (md5) hesaplaniyor
+[aerokey]   181.3s | bellek:  25.49 GB bos | ikonlar hazir dosyalardan kuruldu: 15 dosya
+[aerokey]   181.4s | bellek:  25.49 GB bos | acilis gorselleri kopyalaniyor
+[aerokey]   181.5s | bellek:  25.49 GB bos | Gradle baslatiliyor: assembleRelease
 ```
 
-Yine olursa hangi adımda olduğu doğrudan okunur; artık tahmin gerekmez.
+Süre sütunu hangi adımın yavaş olduğunu, bellek sütunu nerede tüketildiğini
+gösterir. Bir çökmede son satır **nokta atışı** yeri verir.
+
+Derleme sinyalle ölürse hata mesajı bunu bir **ilerleme izi** olarak da
+özetler ve bellek bol idiyse bunu açıkça söyler (kullanıcı boşuna donanım
+yükseltmesin diye):
+
+```
+Derlemenin ilerleyişi (son adımlar):
+  ✓ private.mp3 özeti (md5) hesaplanıyor
+  ✓ şablonlar işleniyor
+  ✓ ikonlar hazır dosyalardan kuruldu (pygame çalıştırılmadı)
+  ✗ açılış görselleri kopyalanıyor
+
+Bellek BOL idi (25.5 GB boş), yani sebep bellek yetersizliği DEĞİL.
+```
+
+Bu adımlar **bağımsız** bloklar hâlinde enjekte edilir: Ren'Py ileride tek
+bir satırı değiştirirse yalnızca o blok atlanır, ötekiler çalışmaya devam
+eder.
 
 > **Neden `/proc/meminfo` yetmez:** konteyner içinde o dosya HOST makinenin
 > belleğini gösterir. 64 GB RAM'li bir sunucuda çalışan 2 GB sınırlı bir
