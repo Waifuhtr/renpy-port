@@ -1864,51 +1864,73 @@ def _execute_build(
     if not _extract_rpa_archives(job, project_root):
         return
 
-    # --- Kök seviyesindeki Python eklentileri ----------------------------
-    # Bazı oyunlar saf Python kütüphanelerini game/ ile aynı seviyede ayrı
-    # bir klasörde tutar ve düz `import X` ile çağırır. Masaüstünde bu
-    # çalışır (başlatıcı proje kökünü sys.path'e ekler), Android'de ÇALIŞMAZ:
-    # orada import, Ren'Py'nin kendi importer'ına düşer ve o da modülleri
-    # yalnızca game/ altında arar. Sonuç: oyun açılır açılmaz
-    # ModuleNotFoundError. RPA açıldıktan SONRA çalışıyoruz ki arşiv
-    # içindeki script'lerdeki import satırları da taranabilsin.
-    pym = pymodules.relocate_python_packages(project_root)
+    # --- Saf Python eklenti klasörleri -----------------------------------
+    # Bazı oyunlar saf Python kütüphanelerini ayrı bir klasörde tutar, o
+    # klasörü kendi elleriyle sys.path'e ekler ve düz `import X` ile çağırır.
+    # Masaüstünde çalışır; Android'de oyun dosyaları APK'nın içinde olduğu
+    # için gezilebilir bir klasör yoktur, sys.path'e eklenen yol hiçbir işe
+    # yaramaz ve import Ren'Py'nin kendi importer'ına düşer. O da modülleri
+    # yalnızca kayıtlı önekler altında arar -> ModuleNotFoundError.
+    # RPA açıldıktan SONRA çalışıyoruz ki arşiv içindeki script'lerdeki
+    # import ve sys.path satırları da taranabilsin.
+    pym = pymodules.prepare_python_packages(project_root)
     if pym.ok:
         satirlar = []
-        for paket in pym.moved:
-            ithal = ", ".join(paket.imported)
-            satirlar.append(
-                f"  - {paket.name}/ ({paket.files} dosya) -> game/{paket.name}/"
-                f"\n      import edilen: {ithal}"
-            )
+        for paket in pym.packages:
+            satirlar.append(f"  - game/{paket.rel}/ ({paket.files} dosya)")
+            satirlar.append(f"      nasıl bulundu : {paket.origin}")
+            if paket.moved:
+                satirlar.append(
+                    f"      taşındı       : proje kökü -> game/{paket.rel}/"
+                )
+            if paket.imported:
+                satirlar.append(
+                    "      import edilen : " + ", ".join(paket.imported)
+                )
+            if paket.exported:
+                satirlar.append(
+                    f"      game/{pymodules.PACKAGES_DIR}/ içine kopyalandı: "
+                    + ", ".join(paket.exported)
+                )
+            else:
+                satirlar.append(
+                    f"      UYARI: game/{pymodules.PACKAGES_DIR}/ içine hiçbir "
+                    "modül kopyalanamadı"
+                )
+            for uyari in paket.notes:
+                satirlar.append(f"      not           : {uyari}")
+
         job.log(
-            "\nProje kökünde Python eklenti klasörü bulundu ve Android'de "
-            "çalışacak şekilde yerleştirildi:\n"
+            "\nSaf Python eklenti klasörü bulundu ve Android'de çalışacak "
+            "şekilde hazırlandı:\n"
             + "\n".join(satirlar)
-            + "\n  Masaüstünde bu klasörler proje kökünden import edilir; "
-            "Android'de böyle bir yol olmadığı için game/ içine taşınıp "
-            "renpy.add_python_directory() ile modül yoluna kaydedildi.\n"
+            + "\n  Modüller iki bağımsız yolla erişilebilir yapıldı:\n"
+            f"    1) game/{pymodules.PACKAGES_DIR}/ içine kopyalandı — burası "
+            "Ren'Py'nin\n       açılışta kendi kaydettiği modül yoludur, "
+            "hiçbir init koduna bağlı değildir.\n"
+            f"    2) {pymodules.GENERATED_SCRIPT} üretildi — "
+            "renpy.add_python_directory() ile\n       klasör ayrıca modül "
+            "yoluna kaydedildi (ikinci katman).\n"
             "  Oyununuzun kendi dosyaları DEĞİŞTİRİLMEDİ (yalnızca geçici "
             "çalışma kopyası)."
         )
     elif pym.skipped:
         job.log(
-            "\nBilgi: kökteki şu klasörler Python eklentisi gibi görünüyor "
-            "ama oyun script'lerinde import edildiklerine dair iz yok, bu "
-            "yüzden dokunulmadı: " + ", ".join(pym.skipped)
+            "\nBilgi: şu klasörler Python eklentisi gibi görünüyor ama oyun "
+            "script'lerinde import edildiklerine dair iz yok, bu yüzden "
+            "dokunulmadı: " + ", ".join(pym.skipped)
         )
     elif pym.candidates:
-        # `moved` VE `skipped` ikisi de boş ama kökte aday bir klasör
-        # GÖRÜLDÜ: tarama bir yerde erken durdu (ör. oyun script'lerinden
-        # hiç metin çıkarılamadı). Bunu SESSİZCE geçmiyoruz — "hiç aday
+        # `packages` VE `skipped` ikisi de boş ama aday bir klasör GÖRÜLDÜ:
+        # tarama bir yerde erken durdu. Bunu SESSİZCE geçmiyoruz — "hiç aday
         # yok, normal" ile "aday vardı ama bir şey ters gitti" farklı
         # şeylerdir ve ikincisi teşhis edilebilir olmalı.
         job.log(
-            "\nUyarı: kökte Python eklenti klasörü gibi görünen "
+            "\nUyarı: Python eklenti klasörü gibi görünen "
             + ", ".join(pym.candidates)
             + f" bulundu ama işlenemedi: {pym.note}\n"
-            "  Bu klasör(ler) game/ dışında kaldığı için oyun onlardan "
-            "`import X` yapıyorsa Android'de ModuleNotFoundError alabilirsiniz."
+            "  Oyun bu klasörlerden `import X` yapıyorsa Android'de "
+            "ModuleNotFoundError alabilirsiniz."
         )
 
     # --- Kimlik ----------------------------------------------------------
