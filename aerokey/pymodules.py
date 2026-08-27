@@ -93,11 +93,20 @@ class MovedPackage:
 
 @dataclass
 class PyModuleResult:
-    """İşlemin sonucu."""
+    """
+    İşlemin sonucu.
+
+    `candidates`: kökte ".py içeren, game/lib/renpy olmayan" bir klasör
+    olarak GÖRÜLEN her şeyin adı — taşınsın taşınmasın. Bu alan, "hiçbir
+    şey olmadı" ile "aday vardı ama bir yerde durduk" durumlarını ayırt
+    etmek için var: ikisi de `moved` boş bırakır, ama biri teşhis
+    edilebilir, öteki normal (oyunun böyle bir klasörü hiç yok).
+    """
 
     moved: list[MovedPackage] = field(default_factory=list)
     script: Optional[Path] = None
     skipped: list[str] = field(default_factory=list)
+    candidates: list[str] = field(default_factory=list)
     note: str = ""
 
     @property
@@ -225,11 +234,31 @@ def relocate_python_packages(project_root: Path) -> PyModuleResult:
         return PyModuleResult(note=f"Proje kökü taranamadı: {exc}")
 
     if not adaylar:
+        # ÇOK YAYGIN, ZARARSIZ durum: oyunun kökte hiç böyle bir klasörü
+        # yok. Sessizce dönüyoruz ki her normal derlemede boş yere log
+        # basılmasın.
         return PyModuleResult(note="Kökte Python eklenti klasörü yok.")
 
-    metin = _script_text(game_dir)
+    aday_adlari = [a.name for a in adaylar]
+
+    try:
+        metin = _script_text(game_dir)
+    except Exception as exc:  # noqa: BLE001
+        # `candidates` DOLU dönüyor: burada bir aday VARDI, taramada bir
+        # sorun çıktı. Bunu app.py'nin sessizce yutmaması için ayırt
+        # ediyoruz — "hiç aday yok" ile "aday var ama tarama patladı"
+        # aynı şey değil.
+        return PyModuleResult(
+            candidates=aday_adlari,
+            note=f"Oyun script'leri taranırken hata: {exc}",
+        )
+
     if not metin:
-        return PyModuleResult(note="Oyun script'leri okunamadı.")
+        return PyModuleResult(
+            candidates=aday_adlari,
+            note="Oyun script'lerinden hiç metin çıkarılamadı "
+                 "(.rpy/.rpyc bulunamadı ya da hepsi boş).",
+        )
 
     tasinan: list[MovedPackage] = []
     atlanan: list[str] = []
@@ -237,6 +266,10 @@ def relocate_python_packages(project_root: Path) -> PyModuleResult:
     for aday in adaylar:
         moduller = _module_names(aday)
         if not moduller:
+            # İçinde .py var (aksi hâlde aday olmazdı) ama hepsi _ren.py:
+            # Ren'Py'nin kendi "Python-in-rpy" biçimi, importer bunları
+            # zaten atlar.
+            atlanan.append(f"{aday.name} (yalnızca _ren.py dosyaları var)")
             continue
 
         kullanilan = _imported_names(metin, moduller)
@@ -271,6 +304,7 @@ def relocate_python_packages(project_root: Path) -> PyModuleResult:
     if not tasinan:
         return PyModuleResult(
             skipped=atlanan,
+            candidates=aday_adlari,
             note="Taşınacak eklenti klasörü bulunamadı.",
         )
 
@@ -283,6 +317,7 @@ def relocate_python_packages(project_root: Path) -> PyModuleResult:
         return PyModuleResult(
             moved=tasinan,
             skipped=atlanan,
+            candidates=aday_adlari,
             note=f"Betik yazılamadı: {exc}",
         )
 
@@ -290,5 +325,6 @@ def relocate_python_packages(project_root: Path) -> PyModuleResult:
         moved=tasinan,
         script=script_path,
         skipped=atlanan,
+        candidates=aday_adlari,
         note="taşındı",
     )

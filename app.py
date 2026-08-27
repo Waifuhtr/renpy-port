@@ -1897,6 +1897,19 @@ def _execute_build(
             "ama oyun script'lerinde import edildiklerine dair iz yok, bu "
             "yüzden dokunulmadı: " + ", ".join(pym.skipped)
         )
+    elif pym.candidates:
+        # `moved` VE `skipped` ikisi de boş ama kökte aday bir klasör
+        # GÖRÜLDÜ: tarama bir yerde erken durdu (ör. oyun script'lerinden
+        # hiç metin çıkarılamadı). Bunu SESSİZCE geçmiyoruz — "hiç aday
+        # yok, normal" ile "aday vardı ama bir şey ters gitti" farklı
+        # şeylerdir ve ikincisi teşhis edilebilir olmalı.
+        job.log(
+            "\nUyarı: kökte Python eklenti klasörü gibi görünen "
+            + ", ".join(pym.candidates)
+            + f" bulundu ama işlenemedi: {pym.note}\n"
+            "  Bu klasör(ler) game/ dışında kaldığı için oyun onlardan "
+            "`import X` yapıyorsa Android'de ModuleNotFoundError alabilirsiniz."
+        )
 
     # --- Kimlik ----------------------------------------------------------
     identity = _resolve_identity(
