@@ -2067,6 +2067,10 @@ def _execute_build(
     ]
     config_path.write_text("\n".join(toml_lines) + "\n", encoding="utf-8")
 
+    # Kurulu SDK'lar. Hem ikon şablonları hem de derleme meta verisi buna
+    # ihtiyaç duyduğu için İKİSİNDEN DE ÖNCE, tek yerde çözülüyor.
+    _sdk_list = _sdk_roots()
+
     # --- Android ikonları (mipmap) ---------------------------------------
     # RAPT bu ikonları normalde pygame ile üretir (image.load, convert_alpha,
     # smoothscale, BLEND_RGBA_MULT — hepsi yerel kod). Yerel kod çöktüğünde
@@ -2106,7 +2110,6 @@ def _execute_build(
     # kapatır; o alt süreç oyunun kendi init python bloklarını çalıştırır ve
     # bazı oyunlarda ekransız konteynerde segfault veriyor. Dosyayı biz
     # yazınca Launcher (yamalı hâliyle) alt süreci hiç başlatmıyor.
-    _sdk_list = _sdk_roots()
     dump_result = build_dump.write_dump(
         project_root,
         _sdk_list[0] if _sdk_list else None,

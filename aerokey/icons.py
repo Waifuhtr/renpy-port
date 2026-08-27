@@ -171,8 +171,15 @@ def _make_icon(fg_src, bg_src, mask_src, size: int):
     Yani: %50 daha büyük bir tuvalde ön planı arka planın üstüne yerleştir,
     ortadan `size` kadarlık bir pencere kırp, sonra maskeyle kanal bazında
     çarp. Kırpma, adaptif ikonun kenar boşluğunu üretir.
+
+    `mask_src` None olabilir. Maske yalnızca RAPT'ın şablon klasöründe
+    bulunur; o klasör bulunamazsa maskesiz devam ediyoruz. Sonuç, köşeleri
+    yuvarlatılmamış kare bir ikondur — Android 8+ zaten adaptif ikonu
+    kendi maskesiyle kırpar, yani fark yalnızca çok eski sürümlerde
+    görülür. Bu, ikon üretimini tümden bırakıp çökme riski olan pygame
+    yoluna dönmekten çok daha iyidir.
     """
-    from PIL import Image, ImageChops
+    from PIL import ImageChops
 
     bigsize = int(1.5 * size)
 
@@ -185,6 +192,9 @@ def _make_icon(fg_src, bg_src, mask_src, size: int):
 
     offset = int(0.25 * size)
     icon = icon.crop((offset, offset, offset + size, offset + size))
+
+    if mask_src is None:
+        return icon
 
     mask = _scale(mask_src, size)
 
@@ -217,14 +227,21 @@ def generate_mipmaps(
     try:
         fg_src, fg_path = _load(project_root, templates_dir, _FOREGROUND)
         bg_src, bg_path = _load(project_root, templates_dir, _BACKGROUND)
-        mask_src, mask_path = _load(project_root, templates_dir, _MASK)
     except Exception as exc:  # noqa: BLE001
         return MipmapResult(note=f"İkon kaynağı okunamadı: {exc}")
+
+    # Maske İSTEĞE BAĞLI: bulunamazsa maskesiz devam ediyoruz. Bunun için
+    # ikon üretimini tümden bırakmak, bizi çökme riski olan pygame yoluna
+    # geri gönderirdi — yani çareyi derde tercih etmiş olurduk.
+    try:
+        mask_src, mask_path = _load(project_root, templates_dir, _MASK)
+    except Exception:  # noqa: BLE001
+        mask_src, mask_path = None, None
 
     sources = {
         "ön plan": str(fg_path),
         "arka plan": str(bg_path),
-        "maske": str(mask_path),
+        "maske": str(mask_path) if mask_path else "yok (maskesiz üretiliyor)",
     }
 
     # Yarım kalmış bir küme, eksiksiz bir kümeden daha tehlikelidir:
