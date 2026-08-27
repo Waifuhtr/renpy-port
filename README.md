@@ -530,11 +530,30 @@ Ren'Py, Android ikonunu proje kökündeki **iki** 432×432 PNG dosyasından
 `android-icon_background.png` (opak arka plan).
 
 - **Tam kontrol:** Bu iki dosyayı kendiniz hazırlayıp projenizin köküne
-  (`game/` ile aynı seviyeye) ekleyin — araç onlara hiç dokunmaz.
+  (`game/` ile aynı seviyeye) ekleyin. Görselin **içeriği korunur**;
+  yalnızca kap standartlaştırılır (aşağıya bakın).
 - **Kolay yol:** Arayüzden tek bir kare görsel yükleyin; ortalanıp
   oranlı küçültülür, beyaz opak arka planla eşleştirilir.
 - **Space'e gömmek:** Bu depoya `icon.png` / `icon.jpg` ekleyip yeniden
   build alın; o andan itibaren her derlemede otomatik kullanılır.
+
+### Neden projenin kendi ikonuna da dokunuyoruz
+
+Bu dosyaları RAPT, `pygame` ile açıp ölçekler
+(`rapt/buildlib/rapt/iconmaker.py`): `image.load` + `convert_alpha` +
+`smoothscale` — hepsi yerel (native) kod. Bozuk ya da olağandışı büyük bir
+PNG orada, Python tarafında **hiçbir iz bırakmadan** çökebilir.
+
+Bu yüzden her katman, derlemeden önce Pillow ile açılıp 432×432 RGBA
+PNG olarak yeniden kodlanıyor. Böylece `pygame`'e giden dosya her zaman
+küçük, sağlam ve öngörülebilir oluyor.
+
+- Zaten 432×432 olan bir katman **yeniden boyutlandırılmaz** (işlem
+  kararlıdır, görsel küçülmez).
+- ~64 megapiksel üstü bir kaynak reddedilir.
+- Bir katman okunamazsa **derleme durmaz**: o katman atlanır ve Ren'Py
+  kendi varsayılanını kullanır; günlüğe sebep yazılır.
+- Değişiklik geçici kopyada yapılır — özgün dosyalarınıza dokunulmaz.
 
 ---
 
@@ -603,6 +622,7 @@ denetim gerekli.
 | APK eskinin üzerine kurulmuyor | Kalıcı disk kapalıysa imza anahtarı değişmiştir. Kalıcı diski açın ya da yedeklediğiniz anahtarı elle yükleyin. |
 | Java/Gradle sürüm uyuşmazlığı | Ren'Py sürümünüze göre Dockerfile'daki JDK sürümünü (8 ↔ 21) güncelleyin. |
 | `Launch failed (returned -11)` / `KeyError: 'bottom'` / `SDL video driver (dummy)` | **Ekran sunucusu yok.** Aşağıya bakın. |
+| `Packaging internal data.` sonrası `Unable to launch Ren'Py: Status 1` (yığın izi YOK) | Süreç bir sinyalle öldürülmüş — genelde **bellek yetersizliği**. Aşağıya bakın. |
 
 ### `Launch failed (returned -11)` — ekran sunucusu sorunu
 
@@ -756,6 +776,107 @@ Space günlüğünde şu iki satırı görmelisiniz:
 > derlemede değil. Söz konusu adım oyunu yalnızca açıp kapattığı için ek
 > yük saniyeler mertebesindedir ve dakikalar süren Gradle aşamasının
 > yanında ihmal edilebilir.
+
+---
+
+## `Packaging internal data.` sonrası sessiz ölüm
+
+Derleme şuraya kadar geliyor, sonra hiçbir açıklama olmadan kesiliyorsa:
+
+```
+Updating project.
+Creating assets directory.
+Packaging internal data.
+Error: Unable to launch Ren'Py: Status 1
+```
+
+### "Status 1" aslında bir çıkış kodu değil
+
+`renutil`'in kaynağında (`renkit/src/renutil.rs`, `launch()`):
+
+```rust
+if check_status && !status.success() {
+    anyhow::bail!("Unable to launch Ren'Py: Status {}",
+                  status.code().unwrap_or(1));
+}
+```
+
+Rust'ta `status.code()` **yalnızca** süreç bir sinyalle öldürüldüğünde
+`None` döner. `.unwrap_or(1)` o durumda yedek olarak `1` basar. Yani
+buradaki "Status 1", gerçek bir 1 çıkış kodundan **ayırt edilemez**.
+
+Ayırt edici olan şey başka: `renutil` alt sürecin hem stdout hem stderr'ini
+canlı akıtır. Gerçek bir Python hatası olsaydı yığın izi günlükte
+görünürdü. **Yığın izi yoksa süreç Python'a hiç uğramadan ölmüştür** —
+SIGKILL (bellek bitti) ya da SIGSEGV (yerel kod çöktü).
+
+### Nerede ölüyor
+
+RAPT'ın kaynağında (`rapt/buildlib/rapt/build.py`) iki mesaj arası:
+
+```python
+684: iface.info(__("Packaging internal data."))   # <- günlüğün son satırı
+...
+694: make_tar(iface, private_mp3, private_dirs)
+696: with open(private_mp3, "rb") as f:
+697:     private_version = hashlib.md5(f.read()).hexdigest()
+...
+713:     iconmaker.IconMaker(directory, config)
+...
+737: iface.info(__("I'm using Gradle to build the package."))  # <- ulaşılmıyor
+```
+
+**Birinci sebep — `f.read()`.** `private.mp3`, motorun ve dört Android
+mimarisi için native kütüphanelerin `tar.gz` arşividir; yüzlerce MB
+olabilir. Bu satır dosyanın **tamamını tek seferde belleğe** alır. Bellek
+sınırı dar bir konteynerde OOM-killer devreye girer.
+
+**İkinci sebep — `IconMaker`.** Projenin ikon dosyalarını `pygame` ile
+açıp ölçekler (`image.load` + `convert_alpha` + `smoothscale`) — hepsi
+yerel kod. Bozuk veya olağandışı büyük bir görüntü burada iz bırakmadan
+çökebilir.
+
+### Çözüm
+
+| Ne | Nasıl |
+|---|---|
+| Bellek tepesi | `md5` artık 4 MB'lık parçalar hâlinde hesaplanıyor. Aynı özet, sabit bellek. |
+| İkon girdisi | Her ikon katmanı artık **bizim tarafımızda** 432×432 RGBA PNG'ye yeniden kodlanıyor — proje kendi ikonunu sağlasa bile. |
+| Görünürlük | Paketleme aşamasının alt adımları günlüğe işaretleniyor. |
+| Ön bilgi | Derleme başlarken bellek/disk durumu günlüğe yazılıyor. |
+
+Ölçüm (300 MB'lik bir `private.mp3` ile, `tracemalloc`):
+
+| | Tepe bellek |
+|---|---|
+| Özgün `f.read()` | 300.0 MB |
+| Parçalı okuma | 8.2 MB |
+
+Üretilen `md5` **birebir aynı** — özet fonksiyonu birikimli olduğu için
+parçalı beslemek sonucu değiştirmez.
+
+Günlükte artık şunları görürsünüz:
+
+```
+Kaynak durumu: bellek 1.4 GB boş / 2.0 GB (cgroup v2), disk(/tmp) 12.1 GB boş
+...
+[aerokey] adim: private.mp3 arsivi olusturuluyor | bos bellek: 1.20 GB
+[aerokey] adim: private.mp3 ozeti (md5) hesaplaniyor | bos bellek: 1.18 GB
+[aerokey] adim: sablonlar isleniyor | bos bellek: 1.18 GB
+[aerokey] adim: uygulama ikonu uretiliyor | bos bellek: 1.17 GB
+```
+
+Yine olursa hangi adımda olduğu doğrudan okunur; artık tahmin gerekmez.
+
+> **Neden `/proc/meminfo` yetmez:** konteyner içinde o dosya HOST makinenin
+> belleğini gösterir. 64 GB RAM'li bir sunucuda çalışan 2 GB sınırlı bir
+> konteyner "62 GB boş" der ve sınırına çarpıp ölür. Gerçek sınır
+> cgroup'ta yazar; önce oraya bakılıyor.
+
+> **Bu yama ölümcül değildir.** Tutunma noktaları bulunamazsa (ileride
+> Ren'Py bu satırları değiştirirse) uyarı basılır ve derleme normal şekilde
+> sürer. Manifest yaması ise bilinçli olarak ölümcüldür: sessizce atlanırsa
+> lisans ekranı olmayan bir APK üretilirdi.
 
 ---
 

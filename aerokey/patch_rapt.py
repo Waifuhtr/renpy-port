@@ -1035,9 +1035,21 @@ _LAUNCHER_LEGACY_RE = re.compile(
     re.DOTALL,
 )
 
-_LAUNCH_ENV_PATCH = "\n".join([
+def _stamp_version(lines: list, version: int) -> str:
+    """
+    Blok metnini birlestirir ve "(surum #)" yer tutucusunu doldurur.
+
+    Surum numarasini metne ELLE yazmak sinsi bir tuzaktir: sabit artirilip
+    metni guncellemek unutulunca surum denetimi hicbir zaman tutmaz ve yama
+    HER derlemede kendini soküp yeniden yazar. Tek kaynaktan uretmek bu
+    ihtimali tumden ortadan kaldiriyor.
+    """
+    return "\n".join(lines).replace("(surum #)", "(surum %d)" % version) + "\n"
+
+
+_LAUNCH_ENV_PATCH = _stamp_version([
     "            environ = dict(os.environ)",
-    '            # --- AEROKEY-PATCH BEGIN (surum 2) --------------------',
+    '            # --- AEROKEY-PATCH BEGIN (surum #) --------------------',
     "            # Bu blok Ren'Py Android Paketleyici tarafindan uretildi.",
     '            # BEGIN/END arasi her yamada tamamen yenilenir.',
     '            #',
@@ -1063,7 +1075,7 @@ _LAUNCH_ENV_PATCH = "\n".join([
     '            if os.environ.get("DISPLAY"):',
     '                environ["SDL_VIDEODRIVER"] = "x11"',
     '            # --- AEROKEY-PATCH END -------------------------------',
-]) + "\n"
+], _LAUNCHER_PATCH_VERSION)
 
 
 def launcher_project_file(sdk: Path) -> Optional[Path]:
@@ -1167,8 +1179,8 @@ _DUMP_BLOCK_RE = re.compile(
     re.DOTALL,
 )
 
-_DUMP_PATCH = "\n".join([
-    '        # --- AEROKEY-DUMP BEGIN (surum 1) ---------------------',
+_DUMP_PATCH = _stamp_version([
+    '        # --- AEROKEY-DUMP BEGIN (surum #) ---------------------',
     "        # Bu blok Ren'Py Android Paketleyici tarafindan uretildi.",
     '        # BEGIN/END arasi her yamada tamamen yenilenir.',
     '        #',
@@ -1191,7 +1203,7 @@ _DUMP_PATCH = "\n".join([
     '        # yalnizca hazir dump varsa ona oncelik verir.',
     '        p.update_dump(False, gui=gui)',
     '        # --- AEROKEY-DUMP END --------------------------------',
-]) + "\n"
+], _DUMP_PATCH_VERSION)
 
 
 def patch_launcher_dump(sdk: Path) -> bool:
@@ -1248,6 +1260,303 @@ def patch_launcher_dump(sdk: Path) -> bool:
     else:
         print("[aerokey] Dump yamasi uygulandi (surum "
               + str(_DUMP_PATCH_VERSION) + "): " + str(target))
+
+    return True
+
+
+# ---------------------------------------------------------------------------
+# 4d) RAPT paketleme adimi: bellek tavani ve alt adim isaretcileri
+# ---------------------------------------------------------------------------
+
+_BUILD_PATCH_VERSION = 1
+_BUILD_BEGIN = "# --- AEROKEY-BUILD BEGIN (surum "
+
+# Yamanin tutundugu uc nokta. Ucu de RAPT 8.5.3 kaynaginda birebir
+# dogrulandi (renpy.org/dl/8.5.3/renpy-8.5.3-rapt.zip) ve dosyada
+# yalnizca BIRER kez geciyor.
+_BUILD_HELPER_ANCHOR = "class PatternList(object):\n"
+
+_BUILD_TAR_ANCHOR = (
+    "    make_tar(iface, private_mp3, private_dirs)\n"
+    "\n"
+    '    with open(private_mp3, "rb") as f:\n'
+    "        private_version = hashlib.md5(f.read()).hexdigest()\n"
+)
+
+_BUILD_ICON_ANCHOR = (
+    "    if config.update_icons:\n"
+    "        iconmaker.IconMaker(directory, config)\n"
+)
+
+# Onceki surumlerin bloklarini soken desenler. Yardimci blok silinirken
+# ardindaki bos satirlar da yutulur, cunku blok enjekte edilirken onlar
+# eklenmisti; boylece sokme islemi dosyayi BIREBIR eski haline dondurur.
+_BUILD_HELPER_RE = re.compile(
+    r"[ \t]*# --- AEROKEY-BUILD BEGIN.*?# --- AEROKEY-BUILD END[^\n]*\n\n*",
+    re.DOTALL,
+)
+
+_BUILD_TAR_RE = re.compile(
+    r"[ \t]*# --- AEROKEY-TAR BEGIN.*?# --- AEROKEY-TAR END[^\n]*\n",
+    re.DOTALL,
+)
+
+_BUILD_ICON_RE = re.compile(
+    r"[ \t]*# --- AEROKEY-ICON BEGIN.*?# --- AEROKEY-ICON END[^\n]*\n",
+    re.DOTALL,
+)
+
+# Blok metinlerindeki "(surum #)" yer tutucusunu _stamp_version dolduruyor
+# (bkz. 4b bolumu): surum numarasini metne elle yazmak, sabit artirildiginda
+# yamanin her derlemede kendini yeniden yazmasina yol acardi.
+def _build_stamp(lines: list) -> str:
+    return _stamp_version(lines, _BUILD_PATCH_VERSION)
+
+
+_BUILD_HELPER_PATCH = _build_stamp([
+    '# --- AEROKEY-BUILD BEGIN (surum #) -------------------------------------',
+    "# Bu blok Ren'Py Android Paketleyici tarafindan uretildi.",
+    '# BEGIN/END arasi her yamada tamamen yenilenir.',
+    '#',
+    '# Amac: "Packaging internal data." asamasinda IZ BIRAKMADAN olen',
+    '# derlemeleri teshis edilebilir kilmak.',
+    '#',
+    '# O asamada surec bir sinyalle olurse (bellek bitince OOM-killer SIGKILL',
+    '# gonderir; yerel bir kutuphane cokerse SIGSEGV) Python tarafinda yigin',
+    '# izi OLUSMAZ. Disaridan gorunen tek sey renutil\'in "Unable to launch',
+    '# Ren\'Py: Status 1" mesaji olur ve hangi alt adimda olundugu bilinmez.',
+    '# Asagidaki isaretciler o bosluğu dolduruyor.',
+    '',
+    '',
+    'def _aerokey_free_memory():',
+    '    """',
+    '    Konteynerde kalan bellek (bayt). Bilinemiyorsa None.',
+    '',
+    '    Konteyner icinde /proc/meminfo HOST makinenin bellegini gosterir, bu',
+    "    yuzden once cgroup sinirina bakiyoruz: 64 GB RAM'li bir sunucuda",
+    '    calisan 2 GB sinirli bir konteyner /proc/meminfo\'ya gore "bol bol yer',
+    '    var" der ve sinirina carpip olur.',
+    '    """',
+    '    import io',
+    '',
+    '    pairs = (',
+    '        ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"),',
+    '        ("/sys/fs/cgroup/memory/memory.limit_in_bytes",',
+    '         "/sys/fs/cgroup/memory/memory.usage_in_bytes"),',
+    '    )',
+    '',
+    '    for limit_path, used_path in pairs:',
+    '        try:',
+    '            with io.open(limit_path, "r") as f:',
+    '                limit = int(f.read().strip())',
+    '            with io.open(used_path, "r") as f:',
+    '                used = int(f.read().strip())',
+    '        except (IOError, OSError, ValueError):',
+    '            continue',
+    '        if limit >= (1 << 62):   # cgroup\'ta "sinir yok"un karsiligi',
+    '            continue',
+    '        return max(0, limit - used)',
+    '',
+    '    try:',
+    '        with io.open("/proc/meminfo", "r") as f:',
+    '            for line in f:',
+    '                if line.startswith("MemAvailable:"):',
+    '                    return int(line.split()[1]) * 1024',
+    '    except (IOError, OSError, ValueError, IndexError):',
+    '        pass',
+    '',
+    '    return None',
+    '',
+    '',
+    'def _aerokey_step(name):',
+    '    """',
+    '    Paketleme asamasinin bir alt adimini gunluge isaretler.',
+    '',
+    '    Bu fonksiyon ASLA hata firlatmaz: bir teshis yardimcisinin derlemeyi',
+    '    dusurmesi kabul edilemez olurdu.',
+    '    """',
+    '    try:',
+    '        free = _aerokey_free_memory()',
+    '        if free is None:',
+    '            note = "bos bellek: bilinmiyor"',
+    '        else:',
+    '            note = "bos bellek: %.2f GB" % (free / (1024.0 ** 3),)',
+    '        sys.stdout.write("[aerokey] adim: %s | %s\\n" % (name, note))',
+    '        sys.stdout.flush()',
+    '    except Exception:',
+    '        pass',
+    '',
+    '',
+    '# --- AEROKEY-BUILD END --------------------------------------------------',
+])
+
+_BUILD_TAR_PATCH = _build_stamp([
+    '    # --- AEROKEY-TAR BEGIN (surum #) -----------------------------------',
+    "    # Bu blok Ren'Py Android Paketleyici tarafindan uretildi.",
+    '    # BEGIN/END arasi her yamada tamamen yenilenir.',
+    '    #',
+    '    # ESKI HALI:',
+    '    #     make_tar(iface, private_mp3, private_dirs)',
+    '    #',
+    '    #     with open(private_mp3, "rb") as f:',
+    '    #         private_version = hashlib.md5(f.read()).hexdigest()',
+    '    #',
+    '    # f.read() dosyanin TAMAMINI tek seferde bellege aliyordu. private.mp3',
+    '    # motorun ve dort Android mimarisi icin native kutuphanelerin tar.gz',
+    '    # arsividir; yuzlerce MB olabilir. Bellek siniri dusuk bir konteynerde',
+    "    # bu tek satir OOM-killer'i tetikler: surec SIGKILL ile oldurulur,",
+    '    # Python tarafinda hicbir iz kalmaz ve renutil bunu yalnizca',
+    '    # "Unable to launch Ren\'Py: Status 1" diye bildirir.',
+    '    #',
+    '    # Parca parca okumak AYNI md5 degerini uretir (ozet fonksiyonu',
+    "    # birikimlidir); yalnizca tepe bellek kullanimi 4 MB'a sabitlenir.",
+    '    _aerokey_step("private.mp3 arsivi olusturuluyor")',
+    '    make_tar(iface, private_mp3, private_dirs)',
+    '',
+    '    _aerokey_step("private.mp3 ozeti (md5) hesaplaniyor")',
+    '',
+    '    _aerokey_md5 = hashlib.md5()',
+    '    with open(private_mp3, "rb") as f:',
+    '        while True:',
+    '            _aerokey_chunk = f.read(4 * 1024 * 1024)',
+    '            if not _aerokey_chunk:',
+    '                break',
+    '            _aerokey_md5.update(_aerokey_chunk)',
+    '',
+    '    private_version = _aerokey_md5.hexdigest()',
+    '',
+    '    _aerokey_step("sablonlar isleniyor (build.gradle, AndroidManifest.xml)")',
+    '    # --- AEROKEY-TAR END ------------------------------------------------',
+])
+
+_BUILD_ICON_PATCH = _build_stamp([
+    '    # --- AEROKEY-ICON BEGIN (surum #) ----------------------------------',
+    "    # Bu blok Ren'Py Android Paketleyici tarafindan uretildi.",
+    '    # BEGIN/END arasi her yamada tamamen yenilenir.',
+    '    #',
+    '    # ESKI HALI:',
+    '    #     if config.update_icons:',
+    '    #         iconmaker.IconMaker(directory, config)',
+    '    #',
+    '    # IconMaker, projenin ikon dosyalarini pygame ile ACAR ve olceklendirir',
+    '    # (pygame.image.load + convert_alpha + smoothscale). Bunlar yerel kod',
+    '    # cagrilaridir; bozuk ya da asiri buyuk bir goruntude iz birakmadan',
+    '    # cokebilirler. Mantik degistirilmedi, yalnizca isaretlendi: girdiyi',
+    '    # guvenli hale getirme isi paketleyici tarafinda yapiliyor',
+    "    # (app.py, _prepare_android_icon -> her ikon 432x432 PNG'ye yeniden",
+    '    # kodlanir).',
+    '    _aerokey_step("uygulama ikonu uretiliyor")',
+    '    if config.update_icons:',
+    '        iconmaker.IconMaker(directory, config)',
+    '',
+    '    _aerokey_step("acilis gorselleri (presplash) kopyalaniyor")',
+    '    # --- AEROKEY-ICON END -----------------------------------------------',
+])
+
+
+def rapt_build_file(sdk: Path) -> Optional[Path]:
+    """RAPT'in paketleme betigi (SDK'da yoksa None)."""
+    candidate = sdk / "rapt" / "buildlib" / "rapt" / "build.py"
+    return candidate if candidate.is_file() else None
+
+
+def patch_rapt_build(sdk: Path) -> bool:
+    """
+    RAPT'in paketleme adimini iki bakimdan saglamlastirir:
+
+      1. private.mp3 ozeti artik parca parca hesaplaniyor. Eskiden dosyanin
+         tamami tek seferde bellege aliniyordu ve bu, bellek siniri dusuk
+         bir konteynerde surecin sessizce oldurulmesine yol aciyordu.
+      2. Paketleme asamasinin alt adimlari gunluge isaretleniyor. O asamada
+         bir sinyal olumu olursa Python yigin izi olusmadigi icin eskiden
+         hangi adimda olundugu hic bilinemiyordu.
+
+    Doner: dosya bu cagrida degistirildi mi.
+
+    BU YAMA OLUMCUL DEGILDIR. Tutunma noktalari bulunamazsa uyari basar ve
+    False doner; derleme normal sekilde surer. Gerekce: bu bir
+    SAGLAMLASTIRMA yamasi, bir zorunluluk degil. Ren'Py bir gun bu
+    satirlari degistirirse derlemeyi tumden kirmak, yamanin onlemeye
+    calistigi zarardan daha buyuk olurdu. (Karsilastirma: manifest yamasi
+    OLUMCULDUR, cunku sessizce atlanirsa lisans ekrani olmayan bir APK
+    uretilir ve bu ancak oyun acildiginda fark edilir.)
+    """
+    target = rapt_build_file(sdk)
+
+    if target is None:
+        print(
+            "[aerokey] UYARI: rapt/buildlib/rapt/build.py bulunamadi, "
+            "paketleme yamasi atlandi: " + str(sdk),
+            file=sys.stderr,
+        )
+        return False
+
+    text = read(target)
+    original = text
+
+    current_tag = _BUILD_BEGIN + str(_BUILD_PATCH_VERSION) + ")"
+    if current_tag in text:
+        print("[aerokey] Paketleme yamasi zaten guncel (surum "
+              + str(_BUILD_PATCH_VERSION) + "): " + str(target))
+        return False
+
+    # Eski surumden kalan bloklari once sok ve ozgun satirlari geri koy.
+    text = _BUILD_HELPER_RE.sub("", text)
+    text, removed_tar = _BUILD_TAR_RE.subn(_BUILD_TAR_ANCHOR, text)
+    text, removed_icon = _BUILD_ICON_RE.subn(_BUILD_ICON_ANCHOR, text)
+    removed = bool(removed_tar or removed_icon)
+
+    missing = [
+        label
+        for label, anchor in (
+            ("PatternList sinifi", _BUILD_HELPER_ANCHOR),
+            ("make_tar/md5 blogu", _BUILD_TAR_ANCHOR),
+            ("ikon blogu", _BUILD_ICON_ANCHOR),
+        )
+        if anchor not in text
+    ]
+
+    if missing:
+        # Hicbir sey yazmadan cikiyoruz: yarim uygulanmis bir yama, hic
+        # uygulanmamis olmaktan daha kotudur.
+        print(
+            "[aerokey] UYARI: paketleme yamasi uygulanmadi, beklenen "
+            "satirlar bulunamadi (" + ", ".join(missing) + "). "
+            "Ren'Py surumu degismis olabilir; derleme normal sekilde "
+            "surecek: " + str(target),
+            file=sys.stderr,
+        )
+        # Sokme islemi yapilmissa dosyayi ozgun haliyle geri yaziyoruz.
+        if text != original:
+            write(target, text)
+        return False
+
+    text = text.replace(
+        _BUILD_HELPER_ANCHOR,
+        _BUILD_HELPER_PATCH + "\n\n" + _BUILD_HELPER_ANCHOR,
+        1,
+    )
+    text = text.replace(_BUILD_TAR_ANCHOR, _BUILD_TAR_PATCH, 1)
+    text = text.replace(_BUILD_ICON_ANCHOR, _BUILD_ICON_PATCH, 1)
+
+    write(target, text)
+
+    # Bayat .pyc kalirsa Ren'Py yeni kaynagi derlemeden eskisini
+    # calistirabilir.
+    cache = target.parent / "__pycache__"
+    if cache.is_dir():
+        for stale in cache.glob("build.*.pyc"):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+
+    if removed:
+        print("[aerokey] Paketleme yamasi surum "
+              + str(_BUILD_PATCH_VERSION) + " olarak yenilendi: " + str(target))
+    else:
+        print("[aerokey] Paketleme yamasi uygulandi (surum "
+              + str(_BUILD_PATCH_VERSION) + "): " + str(target))
 
     return True
 
@@ -1329,6 +1638,7 @@ def apply_all(sdk: Path, skip_gradle_warm: bool = False) -> None:
     patch_manifest_template(sdk)
     patch_launcher_headless(sdk)
     patch_launcher_dump(sdk)
+    patch_rapt_build(sdk)
 
     # Varsayılan (devre dışı) yapılandırmayı yaz ki, paketleyici herhangi bir
     # şey damgalamadan derleme yapılsa bile proje derlenebilsin.

@@ -48,6 +48,7 @@ from aerokey import translation as translation_pack  # noqa: E402
 from aerokey import rpa as rpa_archive  # noqa: E402
 from aerokey import display as virtual_display  # noqa: E402
 from aerokey import build_dump  # noqa: E402
+from aerokey import resources  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
@@ -665,6 +666,11 @@ _BANNER_EXTENSIONS = (".gif", ".png", ".jpg", ".jpeg", ".webp")
 _ICON_CANVAS = 432
 _ICON_SAFE_RATIO = 0.66  # Android adaptif ikon güvenli alanına kaba bir yaklaşım
 
+# Bir ikon kaynağının makul üst sınırı (~8000x8000). Bunun üstü bir ikon
+# değil, kazadır: çözüldüğünde gigabaytlarca bellek isteyebilir ve RAPT'ın
+# pygame tabanlı ikon üreticisini iz bırakmadan düşürebilir.
+_ICON_MAX_SOURCE_PIXELS = 64_000_000
+
 
 def _find_bundled_icon() -> Optional[Path]:
     """Dockerfile'ın /app/icon_source/ altına kopyaladığı gömülü ikon."""
@@ -695,62 +701,176 @@ def _find_bundled_banner() -> Optional[Path]:
     return None
 
 
+def _open_icon_source(path: Path):
+    """
+    Bir görseli güvenli biçimde açıp RGBA'ya çevirir.
+
+    Piksel sınırı bilinçli: RAPT'ın ikon üreticisi (rapt/iconmaker.py) bu
+    dosyaları pygame ile açar — `pygame.image.load` + `convert_alpha` +
+    `smoothscale`, hepsi YEREL kod. Bozuk ya da olağandışı büyük bir
+    görüntüde bu çağrılar iz bırakmadan çökebilir. Kendi tarafımızda
+    Pillow ile açıp yeniden kodlayarak pygame'e her zaman küçük, sağlam ve
+    öngörülebilir bir PNG veriyoruz.
+    """
+    from PIL import Image
+
+    with Image.open(path) as img:
+        pixels = img.width * img.height
+        if pixels > _ICON_MAX_SOURCE_PIXELS:
+            raise ValueError(
+                f"{img.width}x{img.height} piksel, bir ikon için makul "
+                f"sınırın ({_ICON_MAX_SOURCE_PIXELS:,} piksel) üstünde"
+            )
+        return img.convert("RGBA")
+
+
+def _icon_canvas_from(img, fit_ratio: Optional[float]):
+    """
+    Görseli 432x432'lik bir tuvale yerleştirir.
+
+    `fit_ratio`:
+      None  -> tuvali tamamen KAPLA (arka plan katmanı; saydam kenar
+               kalması istenmez)
+      1.0   -> tuvalin tamamına SIĞDIR, oranı koru, kalanı saydam bırak
+               (projenin kendi ön plan katmanını yeniden kodlarken)
+      0.66  -> Android'in adaptif ikon güvenli alanına sığdır (rastgele
+               bir uygulama görselinden ön plan katmanı ÜRETİRKEN)
+
+    1.0 ile 0.66 ayrımı önemli: zaten 432x432 olan bir katmanı güvenli
+    alana sığdırmak onu küçültürdü ve fonksiyon her çalıştığında biraz
+    daha küçülürdü. 1.0'da yeniden boyutlandırma etkisizdir, yani işlem
+    KARARLIDIR.
+    """
+    from PIL import Image
+
+    resample = getattr(Image, "Resampling", Image).LANCZOS
+    ratio = img.width / img.height
+
+    if fit_ratio is not None:
+        safe = int(_ICON_CANVAS * fit_ratio)
+        if ratio >= 1:
+            new_w, new_h = safe, max(1, int(safe / ratio))
+        else:
+            new_h, new_w = safe, max(1, int(safe * ratio))
+    else:
+        if ratio >= 1:
+            new_h, new_w = _ICON_CANVAS, max(1, int(_ICON_CANVAS * ratio))
+        else:
+            new_w, new_h = _ICON_CANVAS, max(1, int(_ICON_CANVAS / ratio))
+
+    resized = img.resize((new_w, new_h), resample)
+    canvas = Image.new("RGBA", (_ICON_CANVAS, _ICON_CANVAS), (0, 0, 0, 0))
+    canvas.paste(
+        resized,
+        ((_ICON_CANVAS - new_w) // 2, (_ICON_CANVAS - new_h) // 2),
+        resized,
+    )
+    return canvas
+
+
 def _prepare_android_icon(
     project_root: Path, uploaded_icon_path: Optional[str]
 ) -> Optional[str]:
     """
     Ren'Py, Android ikonunu proje kökündeki iki 432x432 PNG dosyasından
     üretir: android-icon_foreground.png ve android-icon_background.png.
-    Proje bunları sağlıyorsa dokunmayız; sağlamıyorsa yüklenen/gömülü
-    görselden otomatik üretiriz.
-    """
-    fg_path = project_root / "android-icon_foreground.png"
-    bg_path = project_root / "android-icon_background.png"
-    if fg_path.exists() and bg_path.exists():
-        return None  # proje zaten kendi ikonlarını sağlamış
 
+    Bu fonksiyon iki iş yapar:
+
+      1. Proje kendi ikon katmanlarını sağlıyorsa onları YENİDEN KODLAR
+         (432x432 RGBA PNG). İçerik korunur, yalnızca kap standartlaşır.
+      2. Eksik katmanları, yüklenen ya da imaja gömülü görselden üretir.
+
+    (1) neden gerekli: eskiden proje kendi ikonlarını sağladığında bu
+    fonksiyon hiç devreye girmiyordu ve o dosyalar olduğu gibi RAPT'ın
+    pygame tabanlı ikon üreticisine gidiyordu. Bozuk ya da devasa bir PNG
+    orada, Python tarafında hiçbir iz bırakmadan çökebilir. Artık pygame'e
+    giden dosya HER ZAMAN bizim ürettiğimiz normalleştirilmiş PNG.
+
+    Not: `project_root` geçici bir kopyadır; kullanıcının özgün dosyaları
+    değişmez.
+    """
+    layers = (
+        # (dosya, mevcut katmanı yeniden kodlarken, kaynaktan üretirken, ad)
+        (
+            project_root / "android-icon_foreground.png",
+            1.0,                 # var olanı tuvale sığdır (küçültme YOK)
+            _ICON_SAFE_RATIO,    # kaynaktan üretirken güvenli alana çek
+            "ön plan",
+        ),
+        (
+            project_root / "android-icon_background.png",
+            None,                # var olanı tuvali kaplayacak şekilde ölçekle
+            None,                # üretim ayrı ele alınıyor (düz beyaz)
+            "arka plan",
+        ),
+    )
+
+    existing = [path for path, _, _, _ in layers if path.exists()]
     source = Path(uploaded_icon_path) if uploaded_icon_path else _find_bundled_icon()
-    if source is None or not source.exists():
-        return None  # kaynak yok -> Ren'Py varsayılanını kullanır
+    have_source = source is not None and source.exists()
+
+    if not existing and not have_source:
+        return None  # ne projede ikon var ne de kaynak -> Ren'Py varsayılanı
 
     try:
         from PIL import Image
     except ImportError:
-        return "Uyarı: İkon kaynağı bulundu ama Pillow kurulu değil, ikon üretimi atlandı."
-
-    try:
-        resample = getattr(Image, "Resampling", Image).LANCZOS
-
-        img = Image.open(source).convert("RGBA")
-        safe = int(_ICON_CANVAS * _ICON_SAFE_RATIO)
-
-        ratio = img.width / img.height
-        if ratio >= 1:
-            new_w, new_h = safe, max(1, int(safe / ratio))
-        else:
-            new_h, new_w = safe, max(1, int(safe * ratio))
-        resized = img.resize((new_w, new_h), resample)
-
-        fg_canvas = Image.new("RGBA", (_ICON_CANVAS, _ICON_CANVAS), (0, 0, 0, 0))
-        fg_canvas.paste(
-            resized,
-            ((_ICON_CANVAS - new_w) // 2, (_ICON_CANVAS - new_h) // 2),
-            resized,
-        )
-        fg_canvas.save(fg_path)
-
-        bg_canvas = Image.new("RGBA", (_ICON_CANVAS, _ICON_CANVAS), (255, 255, 255, 255))
-        bg_canvas.save(bg_path)
-    except Exception as exc:  # noqa: BLE001
+        if existing:
+            # Normalleştiremiyoruz ama projenin kendi dosyaları duruyor;
+            # derlemeyi durdurmak yerine riski açıkça bildiriyoruz.
+            return (
+                "Uyarı: Pillow kurulu olmadığı için projenin ikon dosyaları "
+                "doğrulanamadı; Ren'Py onları olduğu gibi kullanacak."
+            )
         return (
-            f"Uyarı: İkon oluşturulurken hata ({exc!r}); Ren'Py varsayılan "
-            "ikonu kullanılacak, derleme devam ediyor."
+            "Uyarı: İkon kaynağı bulundu ama Pillow kurulu değil, ikon "
+            "üretimi atlandı."
         )
 
-    return (
-        f'Otomatik ikon: "{source.name}" kaynağından iki katmanlı adaptif '
-        "ikon (432x432, arka plan beyaz) geçici kopyaya üretildi."
-    )
+    notes: list[str] = []
+    for path, keep_ratio, make_ratio, label in layers:
+        try:
+            if path.exists():
+                # Projenin kendi katmanı: içeriği koru, kabı standartlaştır.
+                with _open_icon_source(path) as img:
+                    canvas = _icon_canvas_from(img, keep_ratio)
+                canvas.save(path)
+                notes.append(f"{label}: projenin kendi görseli doğrulandı")
+                continue
+
+            if not have_source:
+                # Eksik katman + kaynak yok: RAPT kendi şablonundaki
+                # varsayılana düşer, bu geçerli bir durumdur.
+                continue
+
+            if make_ratio is None:
+                # Arka plan için kaynağı büyütmek yerine düz beyaz
+                # kullanıyoruz: adaptif ikonlarda arka plan sade olmalı.
+                canvas = Image.new(
+                    "RGBA", (_ICON_CANVAS, _ICON_CANVAS), (255, 255, 255, 255)
+                )
+                notes.append(f"{label}: düz beyaz üretildi")
+            else:
+                with _open_icon_source(source) as img:
+                    canvas = _icon_canvas_from(img, make_ratio)
+                notes.append(f'{label}: "{source.name}" kaynağından üretildi')
+            canvas.save(path)
+
+        except Exception as exc:  # noqa: BLE001
+            # Tek bir katmanın başarısız olması derlemeyi düşürmemeli:
+            # RAPT eksik katman için kendi şablonundaki varsayılana düşer.
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            notes.append(
+                f"{label}: HATA ({exc}); Ren'Py varsayılanı kullanılacak"
+            )
+
+    if not notes:
+        return None
+    return "Android ikonu (432x432) — " + "; ".join(notes) + "."
 
 
 def _scan_local_py_imports(project_root: Path) -> Optional[str]:
@@ -887,6 +1007,66 @@ def _looks_like_headless_failure(log: str) -> Optional[str]:
         if match:
             return match.group(0)
     return None
+
+
+# RAPT'ın Android paketleme aşamasının adımları, GERÇEKLEŞME SIRASIYLA.
+# Kaynak: rapt/buildlib/rapt/build.py -> build(). "[aerokey] adim:" ile
+# başlayanlar bizim enjekte ettiğimiz ara işaretçilerdir; ötekiler RAPT'ın
+# kendi mesajları.
+_RAPT_STEPS = (
+    ("Updating project.", "proje güncelleniyor"),
+    ("Creating assets directory.", "varlık (assets) klasörü oluşturuluyor"),
+    ("Packaging internal data.", "iç veriler paketleniyor"),
+    ("[aerokey] adim: private.mp3 arsivi", "private.mp3 arşivi oluşturuluyor"),
+    ("[aerokey] adim: private.mp3 ozeti", "private.mp3 özeti (md5) hesaplanıyor"),
+    ("[aerokey] adim: sablonlar", "şablonlar işleniyor"),
+    ("[aerokey] adim: uygulama ikonu", "uygulama ikonu üretiliyor"),
+    ("[aerokey] adim: acilis gorselleri", "açılış görselleri kopyalanıyor"),
+    ("I'm using Gradle to build the package.", "Gradle derlemeyi yürütüyor"),
+)
+
+# renutil, alt süreç bir SİNYALLE öldüğünde (SIGKILL/SIGSEGV) çıkış kodu
+# alamaz ve `.unwrap_or(1)` ile 1 basar. Yani buradaki "Status 1", gerçek
+# bir 1 çıkış kodundan ayırt edilemez; ayırt edici olan, günlükte bir
+# Python yığın izinin BULUNMAMASIDIR.
+# Kaynak: renkit/src/renutil.rs -> launch()
+_RENUTIL_STATUS_RE = re.compile(r"Unable to launch Ren'Py: Status (-?\d+)")
+
+
+def _last_build_step(log: str) -> Optional[str]:
+    """
+    Paketleme sırasında ulaşılan SON adımı döner.
+
+    Bir sinyal ölümünde Python yığın izi oluşmaz; elimizdeki tek ipucu,
+    günlüğe en son hangi adımın yazıldığıdır.
+    """
+    son = None
+    son_konum = -1
+    for marker, label in _RAPT_STEPS:
+        konum = log.rfind(marker)
+        if konum > son_konum:
+            son_konum, son = konum, label
+    return son
+
+
+def _looks_like_silent_death(log: str) -> Optional[str]:
+    """
+    Süreç, Python tarafında iz bırakmadan mı öldü?
+
+    Böyle bir ölümün iki tipik sebebi var:
+      * belleğin bitmesi (çekirdeğin OOM-killer'ı SIGKILL gönderir),
+      * yerel (native) bir kütüphanenin çökmesi (SIGSEGV).
+
+    İkisi de Python'a hiç uğramaz, bu yüzden yığın izi YOKTUR. Yığın izi
+    varsa bu fonksiyon None döner: o zaman gerçek bir Python hatası vardır
+    ve onu bildirmek daha doğrudur.
+    """
+    match = _RENUTIL_STATUS_RE.search(log)
+    if not match:
+        return None
+    if _TRACEBACK_BLOCK_RE.search(log):
+        return None
+    return match.group(0)
 
 
 def _find_likely_root_cause(full_log: str) -> Optional[str]:
@@ -1871,6 +2051,18 @@ def _execute_build(
             "Ren'Py bunu kendisi toplamayı deneyecek."
         )
 
+    # --- Kaynak durumu ----------------------------------------------------
+    # Paketleme adımı (private.mp3 arşivi + Gradle'ın JVM yığını) derlemenin
+    # en bellek yoğun kısmıdır. Süreç bellek yetersizliğinden öldürülürse
+    # Python tarafında HİÇBİR iz kalmaz; o yüzden başlangıç durumunu şimdi
+    # kaydediyoruz ki hata sonrasında sebebi tartışmak zorunda kalmayalım.
+    resource_note = resources.summary([str(job_dir), "/tmp"])
+    job.log(f"\nKaynak durumu: {resource_note}")
+
+    low_memory = resources.low_memory_warning()
+    if low_memory:
+        job.log(f"Uyarı: {low_memory}")
+
     job.log(
         "\nAndroid derlemesi başlatılıyor. İlk çalıştırmada Android SDK "
         "bileşenlerinin indirilmesi nedeniyle bu adım uzun sürebilir; "
@@ -1961,6 +2153,33 @@ def _execute_build(
                 "'[aerokey] SDK yamalanıyor' satırını arayın. Bu yama, Ren'Py'nin "
                 "alt süreç için sürücüyü 'dummy' seçmesini engelliyor.\n"
                 "Üçü de tamamsa Space'i yeniden derleyin (Factory rebuild)."
+            )
+        elif _looks_like_silent_death(full_log):
+            # Süreç Python'a hiç uğramadan öldü: yığın izi yok. Elimizdeki
+            # tek ipucu, günlüğe en son yazılan adım ile o andaki kaynak
+            # durumu. Buradaki "Status 1" gerçek bir çıkış kodu DEĞİL,
+            # renutil'in sinyal ölümünde bastığı yedek değerdir.
+            signature = _looks_like_silent_death(full_log)
+            step = _last_build_step(full_log)
+            step_text = (
+                f"Ulaşılan son adım: {step}.\n" if step
+                else "Günlükte adım işaretçisi bulunamadı.\n"
+            )
+            job.log(
+                f"\nDerleme HATA ile sonuçlandı (kod {return_code}).\n"
+                f"Sebep: alt süreç, hata vermeden ÖLDÜRÜLDÜ ({signature!r}).\n"
+                f"{step_text}"
+                "Günlükte hiçbir Python yığın izi yok. Bu, sürecin bir "
+                "istisna fırlatarak değil, doğrudan bir SİNYALLE "
+                "sonlandırıldığı anlamına gelir. İki tipik sebebi vardır:\n"
+                "  1. BELLEK yetersizliği — çekirdeğin OOM-killer'ı süreci "
+                "sessizce öldürür.\n"
+                "  2. Yerel (native) bir kütüphanenin çökmesi (görüntü "
+                "çözücü, ses aygıtı, yazı tipi…).\n"
+                f"Derleme başlarkenki kaynak durumu: {resource_note}\n"
+                "Space'inizde kalıcı disk/bellek yükseltmesi mümkünse "
+                "denemeye değer; bellek darsa aynı proje daha boş bir anda "
+                "sorunsuz derlenebilir."
             )
         else:
             root_cause = _find_likely_root_cause(full_log)
