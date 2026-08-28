@@ -508,13 +508,71 @@ JVM_TARGET_BLOCK = f"""
 // projenin kendisinden okuyoruz, çünkü Ren'Py bu modülde compileOptions'ı
 // hiç belirtmeyebilir (o zaman AGP varsayılanı geçerli olur) ve bu
 // varsayılan sürümler arasında değişebilir.
+//
+// Kotlin eklentisinin API'si de sürümden sürüme değişiyor, bu yüzden tek
+// bir çağrıya güvenmiyoruz:
+//
+//   * JvmTarget.fromTarget(...) KULLANILMIYOR. Kotlin 1.8 ve 1.9'da bu
+//     fabrika metodu Groovy'den çağrılamıyor (companion object, @JvmStatic
+//     yok) ve derleme "No signature of method: static ...JvmTarget
+//     .fromTarget() is applicable" hatasıyla duruyor. Yalnızca 2.0 ve
+//     sonrasında çalışıyor.
+//   * Bunun yerine enum sabitleri gezilip `target` alanı ("1.8", "17", …)
+//     ya da sabit adı ("JVM_1_8", "JVM_17") eşleştiriliyor. Bu, denenen
+//     tüm sürümlerde (1.8.10, 1.9.24, 2.0.21, 2.2.20) çalışıyor.
+//   * compilerOptions yoksa (Kotlin 1.8 öncesi) eski `kotlinOptions`
+//     String alanına düşülüyor.
+//
+// NULL DENETİMİ ŞART: jvmTarget.set(null) sessizce başarılı oluyor, yani
+// eşleşme bulunamadığında "ayarladım" sanıp hedefi bozardık.
 afterEvaluate {{
-    def javaMajor = android.compileOptions.targetCompatibility.majorVersion
-    // Kotlin, Java 8'i "1.8" olarak adlandırır; diğerlerinde sayı aynıdır.
-    def targetName = (javaMajor == "8") ? "1.8" : javaMajor
-    def kotlinTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.fromTarget(targetName)
-    tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {{
-        compilerOptions.jvmTarget.set(kotlinTarget)
+    try {{
+        def aerokeyJavaTarget = android.compileOptions.targetCompatibility
+        if (aerokeyJavaTarget != null) {{
+            def aerokeyMajor = aerokeyJavaTarget.majorVersion
+            // Kotlin, Java 8'i "1.8" olarak adlandırır; ötekilerde sayı aynı.
+            def aerokeyTargetName = (aerokeyMajor == "8") ? "1.8" : aerokeyMajor
+            def aerokeyEnumName = (aerokeyTargetName == "1.8") ? "JVM_1_8" : ("JVM_" + aerokeyTargetName)
+
+            def aerokeyTarget = null
+            try {{
+                def aerokeyCls = Class.forName("org.jetbrains.kotlin.gradle.dsl.JvmTarget")
+                aerokeyTarget = aerokeyCls.enumConstants.find {{ it.target == aerokeyTargetName }}
+                if (aerokeyTarget == null) {{
+                    aerokeyTarget = aerokeyCls.enumConstants.find {{ it.name() == aerokeyEnumName }}
+                }}
+            }} catch (Throwable ignored) {{
+            }}
+
+            tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {{ aerokeyTask ->
+                def aerokeyOk = false
+
+                if (aerokeyTarget != null) {{
+                    try {{
+                        aerokeyTask.compilerOptions.jvmTarget.set(aerokeyTarget)
+                        aerokeyOk = true
+                    }} catch (Throwable ignored) {{
+                    }}
+                }}
+
+                if (!aerokeyOk) {{
+                    try {{
+                        aerokeyTask.kotlinOptions.jvmTarget = aerokeyTargetName
+                        aerokeyOk = true
+                    }} catch (Throwable ignored) {{
+                    }}
+                }}
+
+                if (!aerokeyOk) {{
+                    logger.warn("AEROKEY: Kotlin JVM hedefi '" + aerokeyTargetName
+                        + "' olarak ayarlanamadi. Kotlin eklentisi bu hedefi "
+                        + "desteklemiyor olabilir; Gradle 'Inconsistent JVM-target' "
+                        + "hatasi verirse sebep budur.")
+                }}
+            }}
+        }}
+    }} catch (Throwable aerokeyError) {{
+        logger.warn("AEROKEY: Kotlin JVM hedefi hizalanamadi: " + aerokeyError)
     }}
 }}
 {JVM_TARGET_END}
