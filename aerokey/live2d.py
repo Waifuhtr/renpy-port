@@ -103,6 +103,27 @@ _ELF_MACHINE = {
 }
 
 
+def _looks_like_android_source(source: str) -> bool:
+    """
+    Bir aday kütüphanenin ANDROID için mi, MASAÜSTÜ için mi oldugunu
+    dosya YOLUNDAN çıkarır.
+
+    ELF mimarisine güvenmek YETMEZ: hem masaüstü Linux derlemesi hem de
+    Android x86_64 (emülatör) derlemesi ayni "x86_64" mimarisinde .so
+    üretir, ama ikisi TAMAMEN FARKLI ikili dosyalardır — biri Ren'Py'nin
+    masaüstü librenpython.so'suyla, öteki Android NDK ile derlenmiştir.
+    Birini ötekinin yerine kullanmak (ör. sembol uyumu denetiminde)
+    yanlış sonuca götürür.
+
+    Ren'Py Launcher'ın kendi kurulum yollarının (install.rpy) hem loose
+    "android/<abi>/..." hem de "Core/dll/android/<abi>/..." biçimini
+    kapsayacak şekilde, yol parçalarında "android" adında bir bileşen
+    arıyoruz.
+    """
+    parcalar = source.replace("\\", "/").lower().split("/")
+    return "android" in parcalar
+
+
 # --------------------------------------------------------------------------
 # ELF okuma (salt okuma — yabancı yerel kod ÇALIŞTIRILMAZ)
 # --------------------------------------------------------------------------
@@ -497,7 +518,16 @@ def prepare(
     librenpython = sdk / LINUX_LIB_DIR / "librenpython.so"
     gerekli = required_symbols(librenpython)
 
-    x86 = [c for c in adaylar if c.arch == "x86_64"]
+    # SADECE masaüstü (Linux x86-64) hedefli adaylar. "android/x86_64/..."
+    # gibi bir Android emülatör kütüphanesi de ELF mimarisi olarak
+    # "x86_64" görünür ama FARKLI bir ikilidir — onu burada kullanmak
+    # yanlış (ör. Android'e özgü, masaüstünde hiç eksik olmayan bir
+    # sembolü "eksik" diye raporlayıp derlemeyi gereksiz yere durdurmak
+    # ya da tam tersi) sonuçlara yol açar.
+    x86 = [
+        c for c in adaylar
+        if c.arch == "x86_64" and not _looks_like_android_source(c.source)
+    ]
     if not x86:
         res.fatal = (
             "Oyun Live2D kullanıyor ama derleme makinesi için gereken "
