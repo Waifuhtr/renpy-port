@@ -577,8 +577,21 @@ def prepare(
         return res
 
     # --- Android (telefon) çekirdekleri ----------------------------------
+    # SADECE yolu acikca "android" diyen adaylar. Cubism SDK ZIP'i ayni ARM
+    # mimarisinde ama Android OLMAYAN baska derlemeler de tasiyor (ornegin
+    # "Core/dll/experimental/linux/arm64/", Raspberry Pi gibi ARM Linux
+    # kartlari icin; ya da "Core/dll/harmonyos/..."). Bunlar ELF mimarisi
+    # olarak "arm64-v8a"/"armeabi-v7a" ile ES gorunuyor ama FARKLI bir
+    # libc'ye baglaniyor: gercek Android derlemesi libc.so/libm.so/libdl.so
+    # (Bionic) ister, Linux ARM derlemesi ise libc.so.6 (glibc) ister — ki
+    # Android'de boyle bir kutuphane YOKTUR. Boyle bir dosyayi jniLibs'e
+    # koymak APK'yi "basariyla" uretir ama telefonda dlopen sessizce
+    # basarisiz olur, cunku linker onun glibc bagimliligini cozemez.
     for abi in ANDROID_ABIS:
-        uygun = [c for c in adaylar if c.arch == abi]
+        uygun = [
+            c for c in adaylar
+            if c.arch == abi and _looks_like_android_source(c.source)
+        ]
         if not uygun:
             continue
         hedef = sdk / JNILIBS / abi / CORE_SO
