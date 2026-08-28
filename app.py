@@ -51,6 +51,7 @@ from aerokey import build_dump  # noqa: E402
 from aerokey import resources  # noqa: E402
 from aerokey import icons  # noqa: E402
 from aerokey import pymodules  # noqa: E402
+from aerokey import live2d  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
@@ -954,18 +955,44 @@ _LAUNCHER_FILES = (
     "game/front_page.rpy",
 )
 
-# Ekransız (X sunucusuz) ortamda oluşan çökmenin imzaları.
-_HEADLESS_FAILURE_PATTERNS = [
+# Ekransız (X sunucusuz) ortamda oluşan çökmenin KESİN imzaları. Bunlardan
+# biri günlükteyse sorun gerçekten ekran/sürücü tarafındadır.
+_HEADLESS_STRONG_PATTERNS = [
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
         r"OpenGL support is either not configured in SDL",
         r"SDL video driver \(dummy\)",
         r"Could not get pygame screen",
-        r"Launch failed \(returned -11\)",
         r"unable to open a display",
         r"Could not initialize SDL",
     )
 ]
+
+# ZAYIF imza: "returned -11" yalnızca "süreç SIGSEGV ile öldü" demektir.
+# Sebebi ekran olabilir ama Live2D gibi başka bir yerel kütüphane de
+# olabilir. Tek başına ekranı suçlamak yanlış yönlendirmedir.
+_HEADLESS_WEAK_PATTERNS = [
+    re.compile(r"Launch failed \(returned -11\)", re.IGNORECASE),
+]
+
+# Gerçek bir OpenGL bağlamının kurulduğunu gösteren satır. Ren'Py bunu
+# yalnızca sürücü gerçekten çalıştığında basar; "dummy" sürücünün OpenGL'i
+# olmadığı için böyle bir satır ASLA oluşmaz.
+_GL_RENDERER_RE = re.compile(r"^\s*Renderer:\s*'(?P<name>[^']*)'", re.MULTILINE)
+
+
+def _gl_context_ok(log: str) -> Optional[str]:
+    """
+    Günlük, çalışan bir OpenGL bağlamı kurulduğunu KANITLIYOR mu?
+
+    Kanıtlıyorsa "xvfb/mesa kurulu mu?" tavsiyesi vermek kullanıcıyı
+    gereksiz bir imaj yeniden derlemesine yollamak olur.
+    """
+    for match in _GL_RENDERER_RE.finditer(log):
+        name = match.group("name").strip()
+        if name and "dummy" not in name.lower():
+            return name
+    return None
 
 
 # Steam yerel kodunun konteynerde cokmesinin imzalari.
@@ -1003,8 +1030,22 @@ def _looks_like_headless_failure(log: str) -> Optional[str]:
     sunucusu yoksa SDL "dummy" sürücüsüne düşer, OpenGL bulunmadığı için
     render başlatılamaz ve süreç segfault ile ölür. Bu, kullanıcının
     oyunuyla ilgili DEĞİLDİR; ortam eksikliğidir.
+
+    ANCAK: "returned -11" tek başına yalnızca bir segfault demektir. Günlük
+    çalışan bir OpenGL bağlamı kurulduğunu gösteriyorsa (Renderer: '...'),
+    ekranı suçlamak YANLIŞTIR — çökme başka bir yerel kütüphaneden gelmiş
+    olabilir (ör. Live2D Cubism Core). Böyle bir durumda None dönüp teşhisi
+    daha uygun olan yola bırakıyoruz.
     """
-    for pattern in _HEADLESS_FAILURE_PATTERNS:
+    for pattern in _HEADLESS_STRONG_PATTERNS:
+        match = pattern.search(log)
+        if match:
+            return match.group(0)
+
+    if _gl_context_ok(log):
+        return None
+
+    for pattern in _HEADLESS_WEAK_PATTERNS:
         match = pattern.search(log)
         if match:
             return match.group(0)
@@ -1839,6 +1880,8 @@ def _execute_build(
         return
     job.log(f"Proje bulundu: {project_root.relative_to(job_dir)}")
 
+    live2d_stash = job_dir / "live2d-stash"
+
     # --- Derlenmiş dağıtım paketi mi? ------------------------------------
     dist = _detect_distribution_build(project_root)
     if dist.is_distribution:
@@ -1854,9 +1897,21 @@ def _execute_build(
             "otomatik okunamayabilir — arayüzdeki 'Derlenmiş proje' "
             "alanlarını doldurmanız önerilir.\n"
         )
+        # Cubism Core kütüphanesi masaüstü paketlerinde lib/ altında durur,
+        # yani birazdan silinecek klasörün içinde. Live2D kullanan oyunlar
+        # için o dosya derlemenin ÇALIŞMA ŞARTIDIR; silinmeden kurtarıyoruz.
+        # (Temizliğin kendisi doğru: lib/ ve renpy/ Android'de kullanılmaz.)
+        kurtarilan = live2d.rescue_cores(project_root, live2d_stash)
+
         cleanup_msg = _strip_desktop_extras(project_root)
         if cleanup_msg:
             job.log(cleanup_msg)
+        if kurtarilan:
+            job.log(
+                f"  Not: silinen klasörlerdeki {kurtarilan} adet Live2D "
+                "Cubism Core kütüphanesi, derleme için gerektiğinden "
+                "önceden kopyalandı."
+            )
 
     # --- Sıkıştırılmış oyun verisi ---------------------------------------
     # Kimlik çözümlemesinden ÖNCE açıyoruz: options.rpy arşivin içindeyse
@@ -2141,6 +2196,54 @@ def _execute_build(
     # ihtiyaç duyduğu için İKİSİNDEN DE ÖNCE, tek yerde çözülüyor.
     _sdk_list = _sdk_roots()
 
+    # --- Live2D Cubism -----------------------------------------------------
+    # Live2D kullanan oyunlar, `image X = Live2D(...)` satırını INIT ZAMANINDA
+    # değerlendirir; bu da yerel Cubism Core kütüphanesini yüklemeye çalışır.
+    # Kütüphane yoksa ya da sürümü Ren'Py'ninkiyle uyuşmuyorsa süreç, Python'a
+    # hiç uğramadan segfault veriyor — günlükte yalnızca "returned -11" kalıyor.
+    # Bu adım o çökmeyi ya önlüyor ya da SEBEBİNİ önceden söylüyor.
+    try:
+        l2d_text = pymodules.script_text(project_root / "game")
+    except Exception:  # noqa: BLE001
+        l2d_text = ""
+
+    l2d = live2d.prepare(
+        project_root,
+        _sdk_list,
+        job_dir / "live2d-work",
+        script_text=l2d_text,
+        extra_search=[live2d_stash],
+    )
+
+    if l2d.used:
+        job.log("\nLive2D Cubism tespit edildi:")
+        for kanit in l2d.evidence:
+            job.log(f"  - {kanit}")
+        if l2d.found:
+            job.log("  bulunan çekirdek kütüphaneler: " + ", ".join(l2d.found))
+
+    if l2d.fatal:
+        # Derlemeyi BAŞLATMIYORUZ. Başlatsak Gradle'a kadar gitmeden, oyunu
+        # açtığı anda iz bırakmadan çökecekti; kullanıcı 10+ dakika bekleyip
+        # sebepsiz bir hata görecekti.
+        job.log("\nDerleme BAŞLATILMADI.\n" + l2d.fatal)
+        job.status = "error"
+        return
+
+    if l2d.desktop_installed:
+        job.log(
+            f"  Derleme makinesine kuruldu: {l2d.desktop_installed}\n"
+            "  (Ren'Py bu kütüphaneyi kendisi getirmez; normalde Launcher'ın "
+            "'Install libraries' ekranından elle kurulur.)"
+        )
+    if l2d.android_installed:
+        job.log(
+            "  APK'ya konan mimariler: " + ", ".join(l2d.android_installed)
+            + "\n  Live2D karakterleri telefonda görüntülenebilecek."
+        )
+    if l2d.warning:
+        job.log("\nUyarı: " + l2d.warning)
+
     # --- Android ikonları (mipmap) ---------------------------------------
     # RAPT bu ikonları normalde pygame ile üretir (image.load, convert_alpha,
     # smoothscale, BLEND_RGBA_MULT — hepsi yerel kod). Yerel kod çöktüğünde
@@ -2284,6 +2387,37 @@ def _execute_build(
                 "Paketleyici bunu RENPY_NO_STEAM ile kapatıyor; bu mesajı "
                 "görüyorsanız app.py güncel değil ya da ortam değişkeni alt "
                 "sürece ulaşmıyor demektir."
+            )
+        elif l2d.used and "returned -11" in full_log:
+            # Oyun Live2D kullanıyor VE süreç segfault ile öldü. Yerel Cubism
+            # kodu bu hattaki en olası segfault kaynağıdır; ekranı ya da
+            # projeyi suçlamadan önce buraya bakılmalı.
+            gl = _gl_context_ok(full_log)
+            job.log(
+                f"\nDerleme HATA ile sonuçlandı (kod {return_code}).\n"
+                "Sebep büyük olasılıkla LIVE2D yerel kütüphanesi.\n"
+                "Oyun Live2D kullanıyor ve süreç, Python'a hiç uğramadan "
+                "(yığın izi bırakmadan) segfault verdi. Ren'Py, APK üretmeden "
+                "önce oyunu bir kez açıyor; `image X = Live2D(...)` satırları "
+                "init sırasında değerlendiği için Cubism Core kütüphanesi tam o "
+                "anda yükleniyor.\n"
+                + (
+                    f"OpenGL bağlamı sorunsuz kurulmuştu (Renderer: {gl!r}), "
+                    "yani sorun ekran/sürücü tarafında DEĞİL.\n"
+                    if gl else ""
+                )
+                + (
+                    f"Kurulan çekirdek: {l2d.desktop_installed}\n"
+                    if l2d.desktop_installed else
+                    "Çekirdek kütüphane kurulamamıştı.\n"
+                )
+                + "Yapılabilecekler:\n"
+                "  1. Live2D'nin resmi 'Cubism SDK for Native' paketini "
+                "(CubismSdkForNative-5-r.*.zip) proje klasörünün köküne koyup "
+                "yeniden yükleyin.\n"
+                "  2. Arayüzden oyununuzun yapıldığı Ren'Py sürümünü seçin: "
+                "Cubism Core sürümü ile Ren'Py sürümü UYUMLU olmak zorundadır "
+                "(Ren'Py 8.5.3 Cubism 5.3 istiyor)."
             )
         elif _looks_like_headless_failure(full_log):
             # Ekransız ortam çökmesi. Bunu "projenizde hata var" diye

@@ -665,3 +665,8 @@ def prepare_python_packages(project_root: Path) -> PyModuleResult:
 
 # Eski ad: dışarıdan bu adla çağıran bir yer kalmışsa kırılmasın.
 relocate_python_packages = prepare_python_packages
+
+# Oyunun tüm script metnini çıkarma işi başka modüllerin de (ör. live2d
+# tespiti) işine yarıyor. Aynı .rpyc çözümlemesini ikinci kez yazmak yerine
+# aynı uygulamayı genel bir adla paylaşıyoruz.
+script_text = _script_text
