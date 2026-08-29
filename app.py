@@ -52,6 +52,7 @@ from aerokey import resources  # noqa: E402
 from aerokey import icons  # noqa: E402
 from aerokey import pymodules  # noqa: E402
 from aerokey import live2d  # noqa: E402
+from aerokey import rpyfix  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
@@ -514,6 +515,110 @@ def _extract_rpa_archives(job: BuildJob, project_root: Path) -> bool:
     return True
 
 
+def _sdk_for_version(roots: list[Path], version: str) -> Optional[Path]:
+    """
+    İstenen Ren'Py sürümünün SDK klasörünü seçer.
+
+    Sürüm ÖNEMLİ: aynı script bir sürümde ayrıştırılıp diğerinde
+    ayrıştırılamayabilir. Ön denetimi, derlemenin gerçekten kullanacağı
+    sürümle yapmazsak yanlış bir güvence vermiş oluruz.
+    """
+    for root in roots:
+        if root.name == version:
+            return root
+    if len(roots) == 1:
+        return roots[0]
+    return None
+
+
+def _syntax_preflight(
+    job: BuildJob, project_root: Path, sdk_root: Optional[Path]
+) -> bool:
+    """
+    Söz dizimi ön denetimi + basit hataların otomatik onarımı.
+
+    Neden derlemeden ÖNCE: bir söz dizimi hatası Ren'Py'yi ilk saniyelerde
+    durduruyor ama kullanıcı bunu ancak 10+ dakikalık derlemenin sonunda,
+    üstelik yanıltıcı bir mesajla görüyordu. Burada 10-30 saniyede kesin
+    yanıt veriyoruz.
+
+    Döner: derlemeye devam edilebilir mi.
+    """
+    if sdk_root is None:
+        job.log(
+            "\nSöz dizimi ön denetimi atlandı: kullanılacak Ren'Py sürümünün "
+            "SDK klasörü bulunamadı."
+        )
+        return True
+
+    job.log(
+        "\nOyunun script'i, derlemeye başlamadan önce gerçek Ren'Py "
+        "yorumlayıcısıyla denetleniyor…"
+    )
+
+    try:
+        res = rpyfix.repair(sdk_root, project_root, logger=job.log)
+    except Exception as exc:  # noqa: BLE001
+        # Ön denetim BİZİM eklediğimiz bir adım; kendi hatamız yüzünden
+        # çalışabilecek bir derlemeyi engellemek kabul edilemez.
+        job.log(
+            f"Uyarı: söz dizimi ön denetimi çalıştırılamadı ({exc}). "
+            "Derlemeye normal şekilde devam ediliyor."
+        )
+        return True
+
+    if res.inconclusive:
+        job.log(f"  {res.note}")
+        return True
+
+    if res.ok and not res.fixes:
+        job.log(
+            f"  Söz dizimi temiz ({res.seconds:.0f} sn); hiçbir dosyaya "
+            "dokunulmadı."
+        )
+        return True
+
+    if res.ok:
+        satirlar = "\n".join(f"  - {f.human()}" for f in res.fixes)
+        job.log(
+            f"  {len(res.fixes)} basit söz dizimi hatası otomatik "
+            f"düzeltildi ({res.rounds} tur, {res.seconds:.0f} sn):\n"
+            f"{satirlar}\n"
+            "  Düzeltmelerin doğruluğunu Ren'Py'nin kendisi onayladı: "
+            "proje artık hatasız ayrıştırılıyor. Bu değişiklikler yalnızca "
+            "derleme kopyasında; kendi proje dosyalarınız DEĞİŞMEDİ."
+        )
+        return True
+
+    # Kalan hata var: derlemeyi başlatmıyoruz. Ren'Py bu hatalarla zaten
+    # ilk saniyede duracaktı; kullanıcıyı 10+ dakika bekletmenin anlamı yok.
+    liste = "\n".join(f"  - {h.human()}" for h in res.remaining[:15])
+    if len(res.remaining) > 15:
+        liste += f"\n  … ve {len(res.remaining) - 15} tane daha."
+
+    ek = ""
+    if res.reverted:
+        ek = (
+            f"\n\n{len(res.reverted)} tanesini otomatik düzeltebiliyordum, "
+            "ama yukarıdaki hata(lar) elde kaldığı için derleme yine "
+            "duracaktı; bu yüzden yarım bir onarım bırakmamak adına "
+            "hepsini geri aldım."
+        )
+    if res.note:
+        ek += f"\n{res.note}"
+
+    job.log(
+        "\nDerleme BAŞLATILMADI: oyunun script'inde söz dizimi hatası var.\n\n"
+        f"{liste}\n\n"
+        "Bu satırlar düzeltilmeden Ren'Py projeyi açamaz, dolayısıyla "
+        "hiçbir derleme geçmez. Hata mesajları doğrudan Ren'Py'nin "
+        "kendisinden geliyor (dosya adı ve satır numarası birebir doğrudur)."
+        + ek
+    )
+    job.status = "error"
+    return False
+
+
 def _resolve_identity(
     project_root: Path,
     package_prefix: str,
@@ -943,6 +1048,65 @@ _TRACEBACK_BLOCK_RE = re.compile(
     re.MULTILINE,
 )
 
+# STANDART Python yığın izi. Yukarıdaki kalıptan FARKLI: o, Ren'Py'nin
+# oyun içi hata ekranı için bastığı özel "Full traceback:" bandını arıyor.
+# Ren'Py'nin kendi kodunda `traceback.print_exc()` çağrılan yerler (örneğin
+# renpy/editor.py) ise düz Python biçimini basıyor. İkisini de tanımak
+# şart: yalnızca birine bakmak, günlükte yığın izi olduğu hâlde "hiç iz
+# yok" sonucuna varmaya yol açıyordu.
+_PY_TRACEBACK_RE = re.compile(
+    r"^Traceback \(most recent call last\):$", re.MULTILINE
+)
+
+
+def _strip_editor_noise(log: str) -> str:
+    """
+    `--errors-in-editor` yüzünden basılan ZARARSIZ yığın izlerini çıkarır.
+
+    Ren'Py'nin kendi launcher'ı (`launcher/game/project.rpy`) her alt süreç
+    çağrısına `--errors-in-editor` ekliyor. Bir söz dizimi hatası bulununca
+    Ren'Py, hatalı satırı göstermek için sistem düzenleyicisini açmayı
+    deniyor; konteynerde `xdg-open` olmadığı için de `renpy/editor.py`
+    şunu yapıyor (gerçek kaynak):
+
+        try:
+            subprocess.call(["xdg-open", filename])
+        except Exception:
+            traceback.print_exc()
+
+    Yani iz YAKALANMIŞ bir istisnanın çıktısı — süreç bu yüzden ölmüyor.
+    Teşhiste bu izi gerçek bir hata sanmamak için ayıklıyoruz.
+    """
+    lines = log.splitlines(keepends=True)
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if lines[i].lstrip().startswith("Traceback (most recent call last):"):
+            son = i + 1
+            while son < len(lines) and lines[son].startswith((" ", "\t")):
+                son += 1
+            if son < len(lines):
+                son += 1  # istisna satırının kendisi
+            blok = "".join(lines[i:son])
+            if "renpy/editor.py" in blok or "xdg-open" in blok:
+                i = son
+                continue
+        out.append(lines[i])
+        i += 1
+    return "".join(out)
+
+
+def _looks_like_parse_error(log: str) -> list[rpyfix.ParseIssue]:
+    """
+    Günlükte Ren'Py'nin SÖZ DİZİMİ hatası raporu var mı?
+
+    Böyle bir hatada süreç çökmüyor: `renpy/script.py` -> `load_script`
+    içinde `if renpy.parser.report_parse_errors(): raise SystemExit(-1)`
+    ile KASITLI olarak duruyor. Bunu "sessiz ölüm" ya da "yerel kütüphane
+    çökmesi" diye raporlamak kullanıcıyı tamamen yanlış yere yollar.
+    """
+    return rpyfix.parse_errors(log)
+
 
 # Ren'Py Launcher'ın KENDİ dosyaları. Bir yığın izinin en alt satırı
 # bunlardan birine düşüyorsa hata kullanıcının oyununda değil, Launcher'ın
@@ -1148,11 +1312,23 @@ def _looks_like_silent_death(log: str) -> Optional[str]:
     İkisi de Python'a hiç uğramaz, bu yüzden yığın izi YOKTUR. Yığın izi
     varsa bu fonksiyon None döner: o zaman gerçek bir Python hatası vardır
     ve onu bildirmek daha doğrudur.
+
+    DİKKAT — burada bir kez yanılmıştık: yalnızca Ren'Py'nin özel
+    "Full traceback:" bandına bakılıyordu. Oyunun script'inde söz dizimi
+    hatası olduğunda günlüğe düşen iz STANDART Python biçiminde
+    ("Traceback (most recent call last):") olduğu için "hiç iz yok"
+    sanılıyor ve gerçekte var olmayan bir "yerel kütüphane çökmesi"
+    raporlanıyordu. Artık her iki biçim de tanınıyor; yalnızca
+    `xdg-open` denemesinden gelen zararsız iz ayıklanıyor.
     """
     match = _RENUTIL_STATUS_RE.search(log)
     if not match:
         return None
     if _TRACEBACK_BLOCK_RE.search(log):
+        return None
+    if _looks_like_parse_error(log):
+        return None
+    if _PY_TRACEBACK_RE.search(_strip_editor_noise(log)):
         return None
     return match.group(0)
 
@@ -2244,6 +2420,15 @@ def _execute_build(
     if l2d.warning:
         job.log("\nUyarı: " + l2d.warning)
 
+    # --- Söz dizimi ön denetimi ------------------------------------------
+    # Live2D adımından SONRA: Cubism çekirdeği kurulmadan oyunun init kodu
+    # çalıştırılamaz. Derleme adımlarından ÖNCE: söz dizimi hatası olan bir
+    # projede geri kalan her şey boşuna zaman kaybı.
+    if not _syntax_preflight(
+        job, project_root, _sdk_for_version(_sdk_list, req.renpy_version)
+    ):
+        return
+
     # --- Android ikonları (mipmap) ---------------------------------------
     # RAPT bu ikonları normalde pygame ile üretir (image.load, convert_alpha,
     # smoothscale, BLEND_RGBA_MULT — hepsi yerel kod). Yerel kod çöktüğünde
@@ -2372,6 +2557,31 @@ def _execute_build(
                 "Gradle ya da Android SDK bileşenleri indirilemedi. Projenizde "
                 "bir sorun olduğu anlamına gelmez — birkaç dakika sonra tekrar "
                 f"deneyin ({max_attempts} otomatik deneme zaten yapıldı)."
+            )
+        elif _looks_like_parse_error(full_log):
+            # Oyunun KENDİ script'inde söz dizimi hatası. Ren'Py bunu
+            # bulunca çökmüyor, KASITLI olarak duruyor (renpy/script.py ->
+            # load_script: `raise SystemExit(-1)`). Bu dal, "sessiz ölüm"
+            # dalından ÖNCE gelmek zorunda: aksi halde kullanıcıya olmayan
+            # bir yerel kütüphane çökmesi raporlanıyordu.
+            hatalar = _looks_like_parse_error(full_log)
+            liste = "\n".join(f"  - {h.human()}" for h in hatalar[:10])
+            if len(hatalar) > 10:
+                liste += f"\n  … ve {len(hatalar) - 10} tane daha."
+            job.log(
+                f"\nDerleme HATA ile sonuçlandı (kod {return_code}).\n"
+                "Sebep: OYUNUN SCRIPT'İNDE SÖZ DİZİMİ HATASI.\n\n"
+                f"{liste}\n\n"
+                "Ren'Py, APK üretmeden önce projeyi kendi yorumlayıcısıyla "
+                "bir kez açıyor. Script ayrıştırılamayınca kasıtlı olarak "
+                "duruyor — bu bir çökme değil, Ren'Py'nin doğru davranışı. "
+                "Yukarıdaki satır(lar) düzeltilmeden hiçbir derleme geçmez.\n"
+                "Günlükte 'xdg-open' ile ilgili bir FileNotFoundError yığın "
+                "izi görüyorsanız onu dikkate almayın: Ren'Py hatalı satırı "
+                "göstermek için metin düzenleyici açmaya çalışıyor, "
+                "konteynerde düzenleyici olmadığı için bu deneme yazdırılıp "
+                "yutuluyor (renpy/editor.py, try/except). Asıl sebep "
+                "yukarıdaki satır(lar)."
             )
         elif _looks_like_steam_failure(full_log) and "returned -11" in full_log:
             # Steam yerel kodu çöktü. Bu, projenin Steam ile ilgisi olmasa
