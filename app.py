@@ -54,6 +54,7 @@ from aerokey import pymodules  # noqa: E402
 from aerokey import live2d  # noqa: E402
 from aerokey import rpyfix  # noqa: E402
 from aerokey import uploads as upload_cache  # noqa: E402
+from aerokey import legacy  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
@@ -518,9 +519,13 @@ def _extract_rpa_archives(job: BuildJob, project_root: Path) -> bool:
             detail += f", {len(result.skipped)} güvensiz ad atlandı"
         job.log(detail)
 
+    bosaltilan = sum(1 for r in results if r.emptied)
     job.log(
-        f"  Toplam {total} dosya açıldı; arşivler silindi "
-        "(aksi halde aynı veri APK'ya iki kez girerdi)."
+        f"  Toplam {total} dosya açıldı; {bosaltilan} arşivin içi "
+        "boşaltıldı (aksi halde aynı veri APK'ya iki kez girerdi).\n"
+        "  Arşiv DOSYALARI yerinde bırakıldı (48 baytlık boş arşiv "
+        "olarak): bazı oyunlar açılışta kendi arşivlerinin VARLIĞINI "
+        "denetliyor ve dosyayı silmek o denetimi düşürüyordu."
     )
     return True
 
@@ -539,6 +544,113 @@ def _sdk_for_version(roots: list[Path], version: str) -> Optional[Path]:
     if len(roots) == 1:
         return roots[0]
     return None
+
+
+# Python 2 döneminden kalma kodun Python 3'te verdiği tipik hatalar.
+# Bunları görmek, "oyun eski bir Ren'Py için yazılmış" teşhisini
+# tahminden ÇIKARIP kanıta bağlıyor.
+# Aşağıdaki metinlerin çoğu Python 3.11 ile ÖLÇÜLDÜ (tahmin değil):
+# hashlib.md5('x') -> "Strings must be encoded before hashing",
+# b'a' + 'b'       -> "can't concat str to bytes",
+# 'x'.decode(...)  -> "'str' object has no attribute 'decode'",
+# re.match(b'x','y') -> "cannot use a bytes pattern on a string-like object",
+# unicode / xrange / iteritems -> NameError / AttributeError.
+_PY2_SIGNATURES = (
+    "a bytes-like object is required",
+    "argument should be integer or bytes-like object",
+    "Strings must be encoded before hashing",
+    "can't concat str to bytes",
+    "must be bytes or a tuple of bytes, not str",
+    "Can't convert 'bytes' object to str implicitly",
+    "cannot use a string pattern on a bytes-like object",
+    "cannot use a bytes pattern on a string-like object",
+    "'str' object has no attribute 'decode'",
+    "'bytes' object has no attribute 'encode'",
+    "'dict' object has no attribute 'iteritems'",
+    "'dict' object has no attribute 'iterkeys'",
+    "'dict' object has no attribute 'itervalues'",
+    "'dict' object has no attribute 'has_key'",
+    "name 'unicode' is not defined",
+    "name 'basestring' is not defined",
+    "name 'xrange' is not defined",
+    "name 'raw_input' is not defined",
+    "name 'long' is not defined",
+    "name 'reduce' is not defined",
+    "name 'cmp' is not defined",
+)
+
+
+def _report_init_errors(job: BuildJob, project_root: Path, res) -> bool:
+    """
+    Oyunun init kodundaki istisnaları bildirir ve derlemeyi durdurur.
+
+    Durdurmak bilinçli ve kanıta dayalı: init kodunda oluşan her istisna,
+    Ren'Py'nin `navigation.json` dosyasına `"error": true` yazdırıyor
+    (`renpy/display/error.py` -> `error_dump()`), Launcher da bunu görünce
+    derlemeyi "Could not get build data from the project" diyerek
+    reddediyor. Yani bu hatalarla derlemeye devam etmek, kullanıcıyı 10+
+    dakika bekletip aynı yere varmak demek.
+    """
+    satirlar = "\n".join(f"  - {h.human()}" for h in res.init_errors[:15])
+    if len(res.init_errors) > 15:
+        satirlar += f"\n  … ve {len(res.init_errors) - 15} tane daha."
+
+    ek = ""
+
+    # Eski Ren'Py sürümüyle yazılmış oyun + Python 3 hatası: bu ikisi bir
+    # aradaysa sebep neredeyse kesin olarak sürüm uyuşmazlığıdır.
+    eski = legacy.detect(project_root)
+    py2_izi = [
+        h for h in res.init_errors
+        if any(imza in h.exception for imza in _PY2_SIGNATURES)
+    ]
+    if py2_izi:
+        surum = f"Ren'Py {eski.pretty}" if eski.version else "eski bir Ren'Py"
+        ek += (
+            "\n\nBU HATALAR SÜRÜM UYUŞMAZLIĞINA İŞARET EDİYOR.\n"
+            "Yukarıdaki hata(lar), Python 2 döneminden kalma kodun Python 3 "
+            f"ile çalıştırıldığında verdiği tipik hatalar. Oyun {surum} ile "
+            "yazılmış; Ren'Py 8.x ise Python 3 kullanıyor. Yani hata "
+            "oyunun kendi kodunda, ama onu tetikleyen şey sürüm farkı.\n"
+            "Yapılabilecekler:\n"
+            "  1. Yukarıda gösterilen satırları Python 3'e uyarlayın. "
+            "En yaygın düzeltmeler: metni hash'lemeden önce .encode() "
+            "ekleyin, dosyayı 'rb' yerine 'r' (ya da tersi) açın, "
+            "bytes ile str'yi aynı ifadede karıştırmayın.\n"
+            "  2. Ren'Py'nin 7.x serisi Python 2'dir (7.8.7'nin içinde "
+            "yalnızca lib/py2-* klasörleri olduğunu doğruladım) ve oyunu "
+            "olduğu gibi çalıştırabilir. ANCAK bunu bu Space'te "
+            "DENEMEDİM: imaja yalnızca Java 21 kurulu ve 7.x'in Android "
+            "araç zinciri daha eski bir Java bekliyor; ayrıca 7.x'in SDK "
+            "paketi RAPT'ı içermiyor, ayrıca indiriliyor. Yani çalışacağı "
+            "kesin değil — denerseniz sonucu bana bildirin."
+        )
+    elif eski.is_python2_era():
+        ek += (
+            f"\n\nNot: oyun Ren'Py {eski.pretty} ile yazılmış (Python 2 "
+            "dönemi), siz ise Python 3 tabanlı bir sürümle derliyorsunuz. "
+            "Yukarıdaki hata bununla ilgili olabilir."
+        )
+
+    job.log(
+        "\nDerleme BAŞLATILMADI: oyunun BAŞLANGIÇ (init) kodu hata veriyor.\n"
+        f"Toplam {len(res.init_errors)} hata "
+        f"({res.seconds:.0f} sn içinde bulundu):\n\n"
+        f"{satirlar}\n\n"
+        "Bunlar söz dizimi hatası DEĞİL: dosyalar ayrıştırılabiliyor ama "
+        "çalıştırılınca patlıyor. Böyle bir hata derlemeyi kesin olarak "
+        "düşürür, çünkü Ren'Py istisnayı görünce derleme meta verisine "
+        "(navigation.json) 'error' damgası basıyor ve Launcher bunu görünce "
+        "paketlemeyi reddediyor:\n"
+        "  \"Could not get build data from the project. Please ensure the "
+        "project runs.\"\n"
+        "Bu yüzden 10+ dakikalık derlemeyi başlatmak yerine şimdi "
+        "durduruldu."
+        + ek
+        + f"\n\nBu denetimi kapatmak isterseniz: {rpyfix._ORTAM_INIT}=0"
+    )
+    job.status = "error"
+    return False
 
 
 def _syntax_preflight(
@@ -580,6 +692,9 @@ def _syntax_preflight(
     if res.inconclusive:
         job.log(f"  {res.note}")
         return True
+
+    if res.init_errors:
+        return _report_init_errors(job, project_root, res)
 
     if res.ok and not res.fixes:
         job.log(
@@ -2138,6 +2253,18 @@ def _execute_build(
         # için o dosya derlemenin ÇALIŞMA ŞARTIDIR; silinmeden kurtarıyoruz.
         # (Temizliğin kendisi doğru: lib/ ve renpy/ Android'de kullanılmaz.)
         kurtarilan = live2d.rescue_cores(project_root, live2d_stash)
+
+        # Ren'Py, eski sürümler için yazılmış oyunlara uyumluluk ayarları
+        # uyguluyor ve hangi sürüm olduğunu `renpy/__init__.py` dosyasından
+        # okuyor (renpy/common/00compat.rpy). O klasör birazdan silinecek;
+        # silmeden önce sürümü okuyup Ren'Py'nin beklediği yere
+        # (game/script_version.txt) taşıyoruz.
+        eski = legacy.preserve(project_root)
+        if eski.version:
+            job.log(
+                f"  Oyunun yazıldığı Ren'Py sürümü: {eski.pretty} "
+                f"({eski.source}).\n  {eski.note}"
+            )
 
         cleanup_msg = _strip_desktop_extras(project_root)
         if cleanup_msg:

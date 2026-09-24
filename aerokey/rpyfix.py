@@ -149,7 +149,26 @@ _NOBLOCK_RE = re.compile(
 # Ren'Py, kaynak satırının altına konumu gösteren bir `^` çiziyor.
 _CARET_RE = re.compile(r"^\s*\^\s*$")
 
+# Ren'Py'nin init/çalışma anı istisnaları için bastığı kendi bandı.
+_FULL_TRACEBACK_RE = re.compile(r"^\s*(Full traceback:|While running game code:)\s*$")
+# Yığın izi satırı: `  File "game/x.rpy", line 5, in script`
+_FRAME_RE = re.compile(r'^\s*File "(?P<file>[^"]+)", line (?P<line>\d+), in ')
+# İstisnanın kendisi: girintisiz, `AdI: mesaj` biçiminde.
+_EXC_RE = re.compile(
+    r"^(?P<exc>[A-Za-z_][\w.]*(?:Error|Exception|Warning)?): ?(?P<msg>.*)$"
+)
+
 _ORTAM_KAPATMA = "AEROKEY_SYNTAX_FIX"
+# Init hatalarında derlemeyi durdurmayı kapatmak için kaçış kapısı.
+_ORTAM_INIT = "AEROKEY_INIT_CHECK"
+
+
+def _kapali(deger: str) -> bool:
+    return deger.strip().lower() in ("0", "false", "off", "hayir")
+
+
+def _init_denetimi_acik() -> bool:
+    return not _kapali(os.environ.get(_ORTAM_INIT, ""))
 
 
 @dataclass
@@ -167,6 +186,48 @@ class ParseIssue:
 
     def human(self) -> str:
         satir = f"{self.file}:{self.line} — {self.message}"
+        if self.source.strip():
+            satir += f"\n      {self.source.strip()}"
+        return satir
+
+
+@dataclass
+class InitError:
+    """
+    Oyunun init kodunda oluşan bir istisna.
+
+    Söz dizimi hatasından farkı: script AYRIŞTIRILABİLİYOR, ama
+    çalıştırılınca patlıyor (`init python:` bloğu, `define` ifadesi,
+    `renpy.error(...)` çağrısı…).
+
+    Neden derlemeyi düşürüyor — gerçek kaynaktan doğrulandı:
+      1. İstisna oluşunca `renpy/display/error.py` -> `error_dump()`
+         çağrılıyor, o da `renpy.dump.dump(True)` ile `navigation.json`
+         dosyasına `"error": true` yazıyor.
+      2. `dump()` bir kez çalışınca `completed_dump = True` oluyor, yani
+         sonradan `main.py`'deki `dump(False)` çağrısı bu bayrağı
+         DÜZELTMİYOR.
+      3. Launcher (`launcher/game/distribute.rpy`) dosyayı okuyup
+         `if project.dump.get("error"): raise` diyor ve derleme
+         "Could not get build data from the project" ile duruyor.
+
+    Yani tek bir init istisnası, 10+ dakikalık derlemenin sonunda kesin
+    başarısızlık demek. Bu yüzden önceden yakalayıp bildiriyoruz.
+    """
+
+    file: str
+    line: int
+    exception: str
+    # Ren'Py, yığın izinde her karenin altına o satırın kaynağını da
+    # basıyor; kullanıcıya göstermek teşhisi doğrudan eyleme çeviriyor.
+    source: str = ""
+
+    @property
+    def key(self) -> tuple[str, int, str]:
+        return (self.file, self.line, self.exception)
+
+    def human(self) -> str:
+        satir = f"{self.file}:{self.line} — {self.exception}"
         if self.source.strip():
             satir += f"\n      {self.source.strip()}"
         return satir
@@ -210,7 +271,15 @@ class RepairResult:
     # Kullanıcıya "şunları otomatik halledebiliyordum ama şu satır elde
     # kaldığı için hepsini geri aldım" diyebilmek için tutuluyor.
     reverted: list[Fix] = field(default_factory=list)
+    # Oyunun INIT kodunda oluşan istisnalar. Söz dizimi hatası değiller —
+    # script ayrıştırılıyor ama çalıştırılınca patlıyor. Derlemeyi yine de
+    # düşürüyorlar; gerekçe `InitError` içinde.
+    init_errors: list["InitError"] = field(default_factory=list)
     note: str = ""
+    # Ön denetim çalıştırılamadıysa sebebin ayrıntısı (yol, istisna,
+    # zaman aşımı süresi). Bir sonraki turda tahmin etmek zorunda
+    # kalmamak için ayrı tutuluyor.
+    failure_detail: str = ""
     # Ayrıştırma hatası DIŞINDA bir sebeple çalışmadıysa burası dolar; bu
     # durumda derlemeyi ASLA durdurmuyoruz (bizim adımımız yüzünden
     # çalışabilecek bir derleme engellenmemeli).
@@ -399,17 +468,27 @@ def find_renpy_binary(sdk_root: Path) -> Optional[Path]:
     if not sdk_root.is_dir():
         return None
 
+    adaylar: list[Path] = []
     lib = sdk_root / "lib"
     if lib.is_dir():
         for kalip in ("py3-linux-*", "linux-*"):
-            for aday in sorted(lib.glob(kalip)):
-                exe = aday / "renpy"
-                if exe.is_file() and os.access(exe, os.X_OK):
-                    return exe
+            adaylar.extend(sorted(p / "renpy" for p in lib.glob(kalip)))
+    adaylar.append(sdk_root / "renpy.sh")
 
-    sh = sdk_root / "renpy.sh"
-    if sh.is_file() and os.access(sh, os.X_OK):
-        return sh
+    for exe in adaylar:
+        if not exe.is_file():
+            continue
+        if os.access(exe, os.X_OK):
+            return exe
+        # Dosya var ama çalıştırma izni yok. Bu, arşivden açılmış
+        # kurulumlarda olabiliyor ve tek başına ön denetimi sessizce
+        # devre dışı bırakırdı; izni verip devam ediyoruz.
+        try:
+            exe.chmod(exe.stat().st_mode | 0o111)
+        except OSError:
+            continue
+        if os.access(exe, os.X_OK):
+            return exe
 
     return None
 
@@ -418,7 +497,7 @@ def run_check(
     renpy_bin: Path,
     project_root: Path,
     timeout: int = 900,
-) -> tuple[Optional[int], str]:
+) -> tuple[Optional[int], str, str]:
     """
     `renpy <proje> compile` çalıştırır.
 
@@ -427,9 +506,22 @@ def run_check(
     çalışıyor ve süreç kapanıyor. Ekran gerekmiyor — DISPLAY olmadan
     da çalıştığı ölçüldü.
 
-    Döner: (çıkış kodu ya da None [zaman aşımı/çalıştırılamadı], çıktı).
+    Ekran KASITLI olarak kapatılıyor (`SDL_VIDEODRIVER=dummy`, DISPLAY
+    yok): bu adımın tek işi script'i denetlemek, hiçbir pencere açması
+    gerekmiyor. Ekransız çalıştırmak, oyunun init kodundaki bir hatanın
+    etkileşimli bir hata ekranı açıp süreci asılı bırakma ihtimalini de
+    tamamen ortadan kaldırıyor.
+
+    Döner: (çıkış kodu ya da None [zaman aşımı/çalıştırılamadı], çıktı,
+    başarısızlık ayrıntısı).
     """
-    cmd = [str(renpy_bin), str(project_root), "compile"]
+    # Mutlak yola çeviriyoruz: alt süreci projenin içinde çalıştırdığımız
+    # için göreli bir yol orada aranır ve "dosya yok" hatası verirdi.
+    cmd = [str(Path(renpy_bin).resolve()), str(Path(project_root).resolve()), "compile"]
+    env = dict(os.environ)
+    env.pop("DISPLAY", None)
+    env["SDL_VIDEODRIVER"] = "dummy"
+    env["SDL_AUDIODRIVER"] = "dummy"
     try:
         proc = subprocess.run(
             cmd,
@@ -438,16 +530,102 @@ def run_check(
             stderr=subprocess.STDOUT,
             timeout=timeout,
             check=False,
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         cikti = exc.output or b""
         if isinstance(cikti, str):
             cikti = cikti.encode("utf-8", "replace")
-        return None, cikti.decode("utf-8", "replace")
+        return (
+            None,
+            cikti.decode("utf-8", "replace"),
+            f"{timeout} saniyede bitmedi (zaman aşımı). Komut: {' '.join(cmd)}",
+        )
     except OSError as exc:
-        return None, f"[rpyfix] Ren'Py çalıştırılamadı: {exc}"
+        return (
+            None,
+            "",
+            f"Ren'Py başlatılamadı ({type(exc).__name__}: {exc}). "
+            f"Komut: {' '.join(cmd)}",
+        )
 
-    return proc.returncode, proc.stdout.decode("utf-8", "replace")
+    return proc.returncode, proc.stdout.decode("utf-8", "replace"), ""
+
+
+def parse_init_errors(text: str) -> list[InitError]:
+    """
+    Ren'Py'nin çıktısından init/çalışma anı istisnalarını çıkarır.
+
+    Gerçek biçim (kullanıcının derleme günlüğünden birebir):
+
+        Full traceback:
+          File "game/splash.rpy", line 5, in script
+          File "renpy/ast.py", line 1193, in execute
+          ...
+          File "game/splash.rpy", line 10, in <module>
+        Exception: DDEK arşiv dosyaları /game klasöründe bulunamadı.
+
+    Konum olarak OYUNA ait son kareyi alıyoruz: Ren'Py'nin kendi
+    dosyalarını (renpy/…) göstermek kullanıcıyı yanlış yere yollardı.
+    """
+    bulunan: list[InitError] = []
+    gorulen: set[tuple[str, int, str]] = set()
+    lines = text.splitlines()
+
+    i = 0
+    while i < len(lines):
+        if not _FULL_TRACEBACK_RE.match(lines[i]):
+            i += 1
+            continue
+
+        son_oyun_karesi: Optional[tuple[str, int, str]] = None
+        j = i + 1
+        while j < len(lines):
+            satir = lines[j]
+            kare = _FRAME_RE.match(satir)
+            if kare:
+                yol = kare.group("file").replace("\\", "/")
+                if yol.startswith("game/"):
+                    # Karenin hemen altındaki satır, o satırın kaynağı
+                    # olabiliyor (başka bir kare ya da işaretçi değilse).
+                    kaynak = ""
+                    if j + 1 < len(lines):
+                        aday = lines[j + 1]
+                        if (
+                            aday.startswith((" ", "\t"))
+                            and not _FRAME_RE.match(aday)
+                            and aday.strip()
+                            and set(aday.strip()) - set("~^ ")
+                        ):
+                            kaynak = aday
+                    try:
+                        son_oyun_karesi = (yol, int(kare.group("line")), kaynak)
+                    except ValueError:
+                        pass
+                j += 1
+                continue
+
+            if not satir.strip() or satir.startswith((" ", "\t")):
+                # Yığın izinin gövdesi (kaynak satırı, `~~~^^^` işaretleri).
+                j += 1
+                continue
+
+            istisna = _EXC_RE.match(satir.strip())
+            if istisna and son_oyun_karesi is not None:
+                kayit = InitError(
+                    file=son_oyun_karesi[0],
+                    line=son_oyun_karesi[1],
+                    exception=satir.strip(),
+                    source=son_oyun_karesi[2],
+                )
+                if kayit.key not in gorulen:
+                    gorulen.add(kayit.key)
+                    bulunan.append(kayit)
+            break
+
+        i = j + 1
+
+    return bulunan
 
 
 def _collect_issues(project_root: Path, output: str) -> list[ParseIssue]:
@@ -870,8 +1048,7 @@ def repair(
     """
     res = RepairResult()
 
-    kapali = os.environ.get(_ORTAM_KAPATMA, "").strip().lower()
-    if kapali in ("0", "false", "off", "hayir"):
+    if _kapali(os.environ.get(_ORTAM_KAPATMA, "")):
         res.note = f"{_ORTAM_KAPATMA}=0 verildiği için söz dizimi ön denetimi atlandı."
         res.inconclusive = True
         return res
@@ -889,12 +1066,19 @@ def repair(
     res.ran = True
     baslangic = time.monotonic()
 
+    # Son çalıştırmanın ham çıktısı; init hatalarını ondan çıkarıyoruz.
+    son_cikti = ""
+
     def denetle() -> tuple[Optional[int], list[ParseIssue]]:
+        nonlocal son_cikti
         # Her denetimden ÖNCE de temizliyoruz: kullanıcının paketinde
         # kendi makinesinden kalma eski bir `errors.txt` olabilir ve onu
         # okumak, var olmayan hataları bildirmek olurdu.
         _temizle(project_root)
-        code, output = run_check(renpy_bin, project_root, timeout=timeout)
+        code, output, detail = run_check(renpy_bin, project_root, timeout=timeout)
+        son_cikti = output
+        if detail:
+            res.failure_detail = detail
         issues = _collect_issues(project_root, output)
         _temizle(project_root)
         res.seconds = time.monotonic() - baslangic
@@ -902,19 +1086,26 @@ def repair(
 
     code, issues = denetle()
 
-    if code == 0 and not issues:
-        res.ok = True
-        return res
-
     if not issues:
-        # Ayrıştırma hatası yok ama süreç yine de başarısız (ya da zaman
-        # aşımı). Bu bizim alanımız değil: derlemeyi ENGELLEMİYORUZ. Bizim
-        # adımımız yüzünden, çalışabilecek bir derleme durdurulmamalı.
+        # Söz dizimi hatası yok. Peki oyunun INIT kodu çalışıyor mu?
+        # Çalışmıyorsa derleme kesin başarısız olacak (gerekçe: InitError).
+        init_hatalari = parse_init_errors(son_cikti)
+        if init_hatalari and _init_denetimi_acik():
+            res.init_errors = init_hatalari
+            return res
+
+        if code == 0:
+            res.ok = True
+            return res
+
+        # Ne ayrıştırma hatası var ne de tanıyabildiğimiz bir init hatası.
+        # Bu bizim alanımız değil: derlemeyi ENGELLEMİYORUZ. Bizim adımımız
+        # yüzünden, çalışabilecek bir derleme durdurulmamalı.
         res.inconclusive = True
         if code is None:
             res.note = (
-                "Ön denetim tamamlanamadı (zaman aşımı ya da süreç "
-                "çalıştırılamadı). Derlemeye normal şekilde devam ediliyor."
+                "Ön denetim tamamlanamadı. Derlemeye normal şekilde devam "
+                "ediliyor.\n  Ayrıntı: " + (res.failure_detail or "bilinmiyor")
             )
         else:
             res.note = (

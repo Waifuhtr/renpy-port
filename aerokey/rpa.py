@@ -44,6 +44,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+# Boş ama GEÇERLİ bir RPA-3.0 arşivi. Açılan arşivin yerine bunu
+# bırakıyoruz; sebebi `_write_placeholder` içinde anlatılıyor.
+_PLACEHOLDER_KEY = 0xDEADBEEF
+_PLACEHOLDER_HEADER_LEN = 34
+
 # Ren'Py arşivlerinde dizin her zaman şu tiplerden oluşur: dict, list,
 # tuple, str, bytes, int. Özel bir sınıf ASLA bulunmaz.
 _SAFE_HEADER_LIMIT = 64
@@ -206,6 +211,8 @@ class ExtractResult:
     files: int = 0
     skipped: list[str] = field(default_factory=list)
     overwritten: int = 0
+    # Arşiv, yerine boş bir arşiv yazılarak boşaltıldı mı.
+    emptied: bool = False
 
 
 def extract(archive: Path, dest: Path) -> ExtractResult:
@@ -273,6 +280,57 @@ def extract(archive: Path, dest: Path) -> ExtractResult:
     return result
 
 
+def empty_archive() -> bytes:
+    """
+    Boş ama tamamen geçerli bir RPA-3.0 arşivi üretir (48 bayt).
+
+    Biçim `_parse_header`/`_load_index` ile birebir uyumlu: başlık satırı,
+    ardından boş bir sözlüğün zlib ile sıkıştırılmış pickle'ı.
+    """
+    index = zlib.compress(pickle.dumps({}, 2))
+    header = f"RPA-3.0 {_PLACEHOLDER_HEADER_LEN:016x} {_PLACEHOLDER_KEY:08x}\n".encode()
+    assert len(header) == _PLACEHOLDER_HEADER_LEN, len(header)
+    return header + index
+
+
+def _write_placeholder(archive: Path) -> bool:
+    """
+    Açılan arşivin yerine boş bir arşiv bırakır.
+
+    NEDEN SİLMİYORUZ
+    ----------------
+    Eskiden arşivi siliyorduk (aynı veri APK'ya iki kez girmesin diye).
+    Ama bazı oyunlar AÇILIŞTA kendi arşiv dosyalarının VARLIĞINI
+    denetliyor; dosya yoksa `renpy.error(...)` ile duruyorlar. Gerçek bir
+    örnek, kullanıcının derleme günlüğünden:
+
+        Exception: DDEK arşiv dosyaları /game klasöründe bulunamadı.
+
+    Bu, oyunun kendi kodunun bilinçli bir kontrolü. Arşivi silmemiz onu
+    tetikliyordu — yani hatayı BİZ üretiyorduk.
+
+    Bu hata masum değil: init kodunda oluşan HER istisna, Ren'Py'nin
+    `navigation.json` dosyasına `error: true` yazdırıyor
+    (`renpy/display/error.py` -> `error_dump()` -> `renpy.dump.dump(True)`)
+    ve Launcher bunu görünce derlemeyi tümden reddediyor
+    (`launcher/game/distribute.rpy`: "Could not get build data from the
+    project"). Yani tek bir varlık kontrolü bütün derlemeyi düşürüyordu.
+
+    Çözüm: dosyayı silmek yerine İÇİ BOŞ ama geçerli bir arşivle
+    değiştiriyoruz.
+      - Varlık kontrolleri geçiyor (dosya duruyor).
+      - Ren'Py arşivi sorunsuz açıyor, içinde hiçbir şey bulamıyor;
+        içerik zaten gevşek dosyalar olarak duruyor (gerçek Ren'Py ile
+        doğrulandı).
+      - APK'ya giren fazladan veri: arşiv başına 48 bayt.
+    """
+    try:
+        archive.write_bytes(empty_archive())
+    except OSError:
+        return False
+    return True
+
+
 def find_archives(game_dir: Path) -> list[Path]:
     """
     `game/` altındaki tüm `.rpa` arşivlerini bulur.
@@ -292,10 +350,12 @@ def find_archives(game_dir: Path) -> list[Path]:
 
 def extract_all(game_dir: Path, remove: bool = True) -> list[ExtractResult]:
     """
-    `game/` altındaki tüm arşivleri açar ve (istenirse) arşivleri siler.
+    `game/` altındaki tüm arşivleri açar ve yerlerine boş arşiv bırakır.
 
-    Arşivi silmek bilinçli: içerik artık gevşek dosyalar olarak durduğu
-    için arşivi bırakmak aynı veriyi APK'ya İKİNCİ KEZ koyardı.
+    `remove=True` (varsayılan) artık "dosyayı sil" değil, "içeriğini
+    boşalt" anlamına geliyor — gerekçesi `_write_placeholder` içinde.
+    Böylece hem aynı veri APK'ya iki kez girmiyor, hem de arşivinin
+    varlığını denetleyen oyunlar çalışmaya devam ediyor.
 
     Bir arşiv okunamazsa o arşiv OLDUĞU GİBİ bırakılır ve hata yukarı
     taşınır; yarım açılmış bir oyunla derlemeye devam etmek, sessizce
@@ -311,9 +371,6 @@ def extract_all(game_dir: Path, remove: bool = True) -> list[ExtractResult]:
         results.append(result)
 
         if remove:
-            try:
-                archive.unlink()
-            except OSError:
-                pass
+            result.emptied = _write_placeholder(archive)
 
     return results
