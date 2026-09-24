@@ -200,6 +200,12 @@ class RepairResult:
     seconds: float = 0.0
     fixes: list[Fix] = field(default_factory=list)
     remaining: list[ParseIssue] = field(default_factory=list)
+    # Projede bulunan TÜM ayrıştırma hataları (düzeltilenler dahil).
+    # Ren'Py ilk hatalı dosyadan sonra durduğu için bu liste ayrı bir
+    # tarama ile toplanıyor; kullanıcı günlükte hepsini bir arada görsün.
+    all_issues: list[ParseIssue] = field(default_factory=list)
+    # Tarama, dosya sınırına ya da süreye takılıp yarıda kaldıysa True.
+    inventory_partial: bool = False
     # Denenmiş ama sonuç temiz çıkmadığı için GERİ ALINMIŞ düzeltmeler.
     # Kullanıcıya "şunları otomatik halledebiliyordum ama şu satır elde
     # kaldığı için hepsini geri aldım" diyebilmek için tutuluyor.
@@ -724,12 +730,112 @@ def apply_fixes(
     return fixes, yedek, denenen
 
 
+def _drop_rpyc(path: Path) -> None:
+    """
+    Bir `.rpy` dosyasının yanındaki derlenmiş `.rpyc` kopyasını siler.
+
+    İçeriğini değiştirdiğimiz her dosya için şart: Ren'Py, `.rpyc` kopyayı
+    kaynaktan daha yeniyse doğrudan kullanabiliyor. Eski bir `.rpyc`
+    kalırsa, geri aldığımız ya da düzelttiğimiz kaynak yerine onun
+    derlenmiş hâli okunur ve sonuç öngörülemez olurdu. Silmek zararsız:
+    kaynak duruyor, Ren'Py yeniden derler.
+    """
+    try:
+        path.with_suffix(path.suffix + "c").unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _geri_al(yedek: dict[Path, bytes]) -> None:
     for path, veri in yedek.items():
         try:
             path.write_bytes(veri)
         except OSError:
-            pass
+            continue
+        _drop_rpyc(path)
+
+
+# --------------------------------------------------------------------------
+# Tüm hataların dökümü
+# --------------------------------------------------------------------------
+
+
+def _inventory(
+    project_root: Path,
+    ilk_issues: list[ParseIssue],
+    denetle,
+    sure_doldu,
+    max_files: int = 40,
+) -> tuple[list[ParseIssue], bool]:
+    """
+    Projedeki TÜM ayrıştırma hatalarını toplar.
+
+    Neden ayrı bir taramaya ihtiyaç var: Ren'Py'nin script yükleyicisi ilk
+    hatalı dosyadan sonra duruyor (`renpy/script.py` -> `load_script`,
+    `if priority != last_priority: if has_parse_errors(): break`). Yani tek
+    bir çalıştırma, yalnızca İLK hatalı dosyanın hatalarını gösteriyor.
+    Kullanıcı ise "beş dosyayı beş turda öğrenmek" yerine hepsini bir arada
+    görmek istiyor — haklı olarak.
+
+    Yöntem: hatası bildirilen dosyaları GEÇİCİ olarak boşaltıp taramayı
+    tekrarlıyoruz; böylece sıradaki hatalı dosya ortaya çıkıyor. Sonunda
+    boşaltılan her dosya bayt bayt geri yazılıyor.
+
+    Boşaltmak neden güvenli: ayrıştırma hataları dosya BAZINDA bulunuyor.
+    Boş bir `.rpy` geçerlidir ve başka bir dosyada YENİ bir ayrıştırma
+    hatası doğurmaz (eksik etiket/ekran gibi şeyler ayrıştırma değil,
+    çalışma anı sorunudur ve burada hiç bakılmıyor). Yani bu yöntem en
+    fazla bir hatayı GÖRMEMEYE yol açabilir, uydurmaya değil.
+
+    Döner: (bulunan tüm hatalar, tarama yarıda mı kaldı).
+    """
+    bulunan: list[ParseIssue] = list(ilk_issues)
+    gorulen = {i.key for i in ilk_issues}
+    bosaltilan: dict[Path, bytes] = {}
+    yarim = False
+    yeni = ilk_issues
+
+    try:
+        for _ in range(max_files):
+            # Bu turda hata bildiren dosyaları sustur.
+            ilerleme = False
+            for issue in yeni:
+                path = _resolve(project_root, issue.file)
+                if path is None or path in bosaltilan:
+                    continue
+                try:
+                    bosaltilan[path] = path.read_bytes()
+                    path.write_bytes(b"")
+                except OSError:
+                    bosaltilan.pop(path, None)
+                    continue
+                _drop_rpyc(path)
+                ilerleme = True
+
+            if not ilerleme:
+                # Bildirilen hataların dosyası çözülemedi; devam etmenin
+                # anlamı yok, sonsuz döngüye girerdik.
+                break
+
+            if sure_doldu():
+                yarim = True
+                break
+
+            _code, issues = denetle()
+            yeni = [i for i in issues if i.key not in gorulen]
+            if not yeni:
+                break
+            for issue in yeni:
+                gorulen.add(issue.key)
+            bulunan.extend(yeni)
+        else:
+            yarim = True
+    finally:
+        # Ne olursa olsun her dosya geri yazılıyor.
+        _geri_al(bosaltilan)
+
+    bulunan.sort(key=lambda i: (i.file, i.line))
+    return bulunan, yarim
 
 
 # --------------------------------------------------------------------------
@@ -817,6 +923,27 @@ def repair(
                 "derlemeye normal şekilde devam ediliyor."
             )
         return res
+
+    # --- Tüm hataların dökümü --------------------------------------------
+    # Ren'Py tek çalıştırmada yalnızca ilk hatalı dosyayı gösteriyor.
+    # Onarıma girişmeden önce projenin TAMAMINI tarayıp bütün hataları
+    # çıkarıyoruz; hem kullanıcı hepsini bir arada görsün hem de hepsini
+    # TEK turda düzeltmeyi deneyebilelim.
+    kayit("  Hatalar bulundu; projenin tamamı taranıyor (tüm hatalar için)…")
+
+    def sure_doldu() -> bool:
+        return (time.monotonic() - baslangic) > budget
+
+    issues, yarim = _inventory(project_root, issues, denetle, sure_doldu)
+    res.all_issues = list(issues)
+    res.inventory_partial = yarim
+
+    dosya_sayisi = len({i.file for i in issues})
+    kayit(
+        f"  Tarama bitti: {len(issues)} söz dizimi hatası, "
+        f"{dosya_sayisi} dosyada."
+        + (" (tarama yarıda kaldı, daha fazlası olabilir)" if yarim else "")
+    )
 
     # Dokunduğumuz her dosyanın EN İLK hâli. Sonuç temiz çıkmazsa hepsi
     # buradan geri yazılıyor.

@@ -53,6 +53,7 @@ from aerokey import icons  # noqa: E402
 from aerokey import pymodules  # noqa: E402
 from aerokey import live2d  # noqa: E402
 from aerokey import rpyfix  # noqa: E402
+from aerokey import uploads as upload_cache  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
@@ -66,8 +67,13 @@ WORK_ROOT = Path(tempfile.gettempdir()) / "renpy_android_jobs"
 # Üretilen APK/AAB dosyaları buraya kopyalanır ve kullanıcıya sunulana kadar
 # SİLİNMEZ (yalnızca eskiyince, aşağıdaki temizlik ile silinir).
 RESULTS_ROOT = Path(tempfile.gettempdir()) / "renpy_android_results"
+# Yüklenen proje ZIP'leri burada, Space kapanana kadar duruyor. Böylece
+# aynı oyunu ikinci kez derlerken dosyayı yeniden yüklemek gerekmiyor.
+# BİLEREK ayrı bir kök: WORK_ROOT'taki 6 saatlik temizlik buraya uğramıyor.
+UPLOADS_ROOT = Path(tempfile.gettempdir()) / "renpy_android_uploads"
 WORK_ROOT.mkdir(parents=True, exist_ok=True)
 RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+UPLOADS_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def _resolve_data_dir() -> tuple[Path, bool]:
@@ -179,6 +185,10 @@ def _cleanup_old_dirs(root: Path, max_age_hours: float = 6.0) -> None:
 
 _cleanup_old_dirs(WORK_ROOT)
 _cleanup_old_dirs(RESULTS_ROOT)
+
+# Yükleme önbelleği. Süreç yeniden başlasa bile diskteki girdileri okuyup
+# devam eder; yalnızca konteyner (Space) kapandığında boşalır.
+UPLOADS = upload_cache.UploadCache(UPLOADS_ROOT)
 
 
 # ===========================================================================
@@ -592,23 +602,51 @@ def _syntax_preflight(
 
     # Kalan hata var: derlemeyi başlatmıyoruz. Ren'Py bu hatalarla zaten
     # ilk saniyede duracaktı; kullanıcıyı 10+ dakika bekletmenin anlamı yok.
-    liste = "\n".join(f"  - {h.human()}" for h in res.remaining[:15])
-    if len(res.remaining) > 15:
-        liste += f"\n  … ve {len(res.remaining) - 15} tane daha."
+    #
+    # Listeyi `all_issues`ten kuruyoruz: Ren'Py tek çalıştırmada yalnızca
+    # ilk hatalı dosyayı gösterdiği için `remaining` eksik kalabiliyor.
+    # `all_issues`, projenin tamamı taranarak çıkarılmış TAM dökümdür.
+    hepsi = res.all_issues or res.remaining
+    onarilabilir = {(f.file, f.line) for f in res.reverted}
+
+    gruplar: dict[str, list] = {}
+    for hata in hepsi:
+        gruplar.setdefault(hata.file, []).append(hata)
+
+    parcalar: list[str] = []
+    for dosya in sorted(gruplar):
+        parcalar.append(f"  {dosya}")
+        for hata in sorted(gruplar[dosya], key=lambda h: h.line):
+            isaret = " [otomatik düzeltilebilir]" if (
+                hata.file, hata.line
+            ) in onarilabilir else ""
+            parcalar.append(f"    satır {hata.line}: {hata.message}{isaret}")
+            if hata.source.strip():
+                parcalar.append(f"      {hata.source.strip()}")
+    liste = "\n".join(parcalar)
 
     ek = ""
     if res.reverted:
         ek = (
-            f"\n\n{len(res.reverted)} tanesini otomatik düzeltebiliyordum, "
-            "ama yukarıdaki hata(lar) elde kaldığı için derleme yine "
-            "duracaktı; bu yüzden yarım bir onarım bırakmamak adına "
-            "hepsini geri aldım."
+            f"\n\n{len(res.reverted)} tanesini otomatik düzeltebiliyordum "
+            "(yukarıda işaretli), ama geri kalanları düzeltemediğim için "
+            "derleme yine duracaktı; yarım bir onarım bırakmamak adına "
+            "hepsini geri aldım. Siz işaretsiz olanları düzeltirseniz, "
+            "işaretliler bir sonraki derlemede kendiliğinden hallolur."
+        )
+    if res.inventory_partial:
+        ek += (
+            "\n\nUyarı: tarama süre/dosya sınırına takıldı; listede "
+            "olmayan başka hatalar da olabilir."
         )
     if res.note:
         ek += f"\n{res.note}"
 
+    dosya_sayisi = len(gruplar)
     job.log(
-        "\nDerleme BAŞLATILMADI: oyunun script'inde söz dizimi hatası var.\n\n"
+        "\nDerleme BAŞLATILMADI: oyunun script'inde söz dizimi hatası var.\n"
+        f"Toplam {len(hepsi)} hata, {dosya_sayisi} dosyada "
+        f"({res.seconds:.0f} sn taranarak bulundu):\n\n"
         f"{liste}\n\n"
         "Bu satırlar düzeltilmeden Ren'Py projeyi açamaz, dolayısıyla "
         "hiçbir derleme geçmez. Hata mesajları doğrudan Ren'Py'nin "
@@ -1882,6 +1920,10 @@ def _stream_subprocess(cmd, job: BuildJob, cwd=None, env=None) -> int:
 class BuildRequest:
     """Arayüzden gelen, tek bir derlemeyi tanımlayan tüm girdiler."""
     zip_path: Path
+    # Proje ZIP'i önbellekten geliyorsa kimliği. Doluysa derleme bitince
+    # dosya SİLİNMEZ (bir sonraki derlemede yeniden kullanılacak) ve
+    # önbellekteki "kullanımda" işareti bırakılır.
+    zip_cached_id: Optional[str]
     icon_path: Optional[Path]
     banner_path: Optional[Path]
     translation_path: Optional[Path]
@@ -2018,10 +2060,19 @@ def run_build(job: BuildJob, req: BuildRequest) -> None:
         if job.status == "running":
             job.status = "error"
         shutil.rmtree(job_dir, ignore_errors=True)
-        for temp_input in (
-            req.zip_path, req.icon_path, req.banner_path,
+
+        gecici = [
+            req.icon_path, req.banner_path,
             req.translation_path, req.keystore_path,
-        ):
+        ]
+        if req.zip_cached_id:
+            # Proje ZIP'i önbellekte: SİLMİYORUZ. Kullanıcı aynı oyunu
+            # tekrar derlerken dosyayı yeniden yüklemek zorunda kalmasın.
+            UPLOADS.release(req.zip_cached_id)
+        else:
+            gecici.append(req.zip_path)
+
+        for temp_input in gecici:
             if temp_input is not None:
                 try:
                     Path(temp_input).unlink(missing_ok=True)
@@ -2036,7 +2087,16 @@ def _execute_build(
     project_extract_dir: Path,
     out_dir: Path,
 ) -> None:
-    job.log("Proje ZIP dosyası açılıyor…")
+    kaynak = UPLOADS.get(req.zip_cached_id) if req.zip_cached_id else None
+    if kaynak is not None:
+        job.log(
+            f"Proje ZIP dosyası açılıyor… (önbellekten: {kaynak.name}, "
+            f"{kaynak.size / (1024 * 1024):.1f} MB, {kaynak.uses}. kullanım)\n"
+            "Bu dosya Space kapanana kadar önbellekte kalacak; bir sonraki "
+            "derlemede yeniden yüklemeniz gerekmeyecek."
+        )
+    else:
+        job.log("Proje ZIP dosyası açılıyor…")
     try:
         with zipfile.ZipFile(req.zip_path) as zf:
             zf.extractall(project_extract_dir)
@@ -2782,6 +2842,115 @@ async def _save_upload(upload: Optional[UploadFile], suffix: str) -> Optional[Pa
     return path
 
 
+async def _stream_to_cache(upload: UploadFile) -> upload_cache.CachedUpload:
+    """
+    Yüklenen ZIP'i önbelleğe alır ve SHA-256'sını hesaplar.
+
+    Özeti yazarken hesaplıyoruz: dosyayı ikinci kez okumak, büyük projelerde
+    tek başına saniyeler eder. Özet, aynı dosyanın ikinci kez yüklenmesi
+    durumunda kopya tutmamak için kullanılıyor.
+    """
+    entry_id, part_path = UPLOADS.new_staging_path()
+    hasher = hashlib.sha256()
+    try:
+        with part_path.open("wb") as target:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+                target.write(chunk)
+    except BaseException:
+        # Yarıda kesilen yükleme önbellekte bozuk bir ZIP bırakmasın.
+        UPLOADS.abort(entry_id)
+        raise
+    finally:
+        await upload.close()
+
+    return UPLOADS.commit(
+        entry_id, part_path, upload.filename or "proje.zip", hasher.hexdigest()
+    )
+
+
+@app.post("/api/uploads")
+async def api_upload(project_zip: UploadFile = File(...)) -> JSONResponse:
+    """
+    Proje ZIP'ini derlemeden AYRI olarak yükler ve önbelleğe alır.
+
+    Böylece yükleme bir kez yapılıyor; sonraki derlemeler aynı dosyayı
+    `cached_zip_id` ile anında kullanıyor.
+    """
+    if not project_zip.filename:
+        raise HTTPException(status_code=400, detail="Bir dosya seçilmedi.")
+
+    entry = await _stream_to_cache(project_zip)
+
+    if entry.size == 0:
+        UPLOADS.remove(entry.id)
+        raise HTTPException(status_code=400, detail="Yüklenen dosya boş.")
+
+    if not zipfile.is_zipfile(UPLOADS.path_of(entry.id)):
+        UPLOADS.remove(entry.id)
+        raise HTTPException(
+            status_code=400,
+            detail="Yüklenen dosya geçerli bir ZIP arşivi değil.",
+        )
+
+    return JSONResponse({"upload": entry.public()})
+
+
+@app.get("/api/uploads")
+async def api_uploads() -> JSONResponse:
+    """Önbellekteki yüklemeleri listeler (en son kullanılan en başta)."""
+    entries = UPLOADS.list()
+    return JSONResponse(
+        {
+            "uploads": [e.public() for e in entries],
+            "total_bytes": sum(e.size for e in entries),
+            "free_bytes": UPLOADS.free_bytes(),
+        }
+    )
+
+
+@app.delete("/api/uploads/{upload_id}")
+async def api_upload_delete(upload_id: str) -> JSONResponse:
+    if UPLOADS.get(upload_id) is None:
+        raise HTTPException(status_code=404, detail="Böyle bir yükleme yok.")
+    if not UPLOADS.remove(upload_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Bu dosya şu anda bir derlemede kullanılıyor; silinemez.",
+        )
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/jobs")
+async def api_jobs() -> JSONResponse:
+    """
+    Bilinen derleme işlerini listeler (en yeni en başta).
+
+    Arayüz, sayfa yeniden açıldığında süren bir derlemeye yeniden
+    bağlanabilmek için bunu kullanıyor: tarayıcı kapansa bile derleme
+    arka planda sürüyor.
+    """
+    with _jobs_lock:
+        items = list(JOBS.values())
+    items.sort(key=lambda j: j.created_at, reverse=True)
+    return JSONResponse(
+        {
+            "jobs": [
+                {
+                    "id": j.id,
+                    "status": j.status,
+                    "created_at": j.created_at,
+                    "lines": len(j.lines),
+                }
+                for j in items[:20]
+            ]
+        }
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
     index_path = WEB_DIR / "index.html"
@@ -2896,11 +3065,12 @@ async def api_auto_keystore_info() -> JSONResponse:
 
 @app.post("/api/build")
 async def api_build(
-    project_zip: UploadFile = File(...),
+    project_zip: Optional[UploadFile] = File(None),
     icon: Optional[UploadFile] = File(None),
     banner: Optional[UploadFile] = File(None),
     translation: Optional[UploadFile] = File(None),
     keystore: Optional[UploadFile] = File(None),
+    cached_zip_id: str = Form(""),
     renpy_version: str = Form(DEFAULT_RENPY_VERSION),
     want_apk: str = Form("true"),
     want_aab: str = Form("false"),
@@ -2935,17 +3105,46 @@ async def api_build(
             status_code=400, detail="En az bir çıktı formatı seçmelisiniz (APK ve/veya AAB)."
         )
 
-    zip_path = await _save_upload(project_zip, ".zip")
-    if zip_path is None:
+    # Proje ZIP'i iki yoldan gelebilir: önbellekten (yeniden yükleme yok)
+    # ya da bu istekle birlikte. İkinci durumda dosyayı yine önbelleğe
+    # alıyoruz ki bir sonraki derleme yüklemeyi beklemesin.
+    cached_id = (cached_zip_id or "").strip()
+    entry: Optional[upload_cache.CachedUpload] = None
+
+    if cached_id:
+        entry = UPLOADS.acquire(cached_id)
+        if entry is None:
+            raise HTTPException(
+                status_code=410,
+                detail=(
+                    "Önbellekteki dosya artık yok (Space yeniden başlamış ya da "
+                    "yer açmak için silinmiş olabilir). Projeyi yeniden yükleyin."
+                ),
+            )
+    elif project_zip is not None and project_zip.filename:
+        stored = await _stream_to_cache(project_zip)
+        entry = UPLOADS.acquire(stored.id)
+        if entry is None:
+            raise HTTPException(status_code=500, detail="Yükleme önbelleğe alınamadı.")
+    else:
         raise HTTPException(status_code=400, detail="Bir Ren'Py proje ZIP dosyası yükleyin.")
 
-    icon_path = await _save_upload(icon, ".img")
-    banner_path = await _save_upload(banner, ".gif")
-    translation_path = await _save_upload(translation, ".zip")
-    keystore_path = await _save_upload(keystore, ".keystore")
+    zip_path = UPLOADS.path_of(entry.id)
+
+    # Buradan sonrası hata verirse "kullanımda" işaretini bırakmalıyız;
+    # yoksa girdi, silinemeyen bir hayalet olarak önbellekte kalırdı.
+    try:
+        icon_path = await _save_upload(icon, ".img")
+        banner_path = await _save_upload(banner, ".gif")
+        translation_path = await _save_upload(translation, ".zip")
+        keystore_path = await _save_upload(keystore, ".keystore")
+    except BaseException:
+        UPLOADS.release(entry.id)
+        raise
 
     request = BuildRequest(
         zip_path=zip_path,
+        zip_cached_id=entry.id,
         icon_path=icon_path,
         banner_path=banner_path,
         translation_path=translation_path,
@@ -2976,7 +3175,7 @@ async def api_build(
         target=run_build, args=(job, request), daemon=True, name=f"build-{job.id}"
     ).start()
 
-    return JSONResponse({"job_id": job.id})
+    return JSONResponse({"job_id": job.id, "upload": entry.public()})
 
 
 @app.get("/api/jobs/{job_id}/stream")

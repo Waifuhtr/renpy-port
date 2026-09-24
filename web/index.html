@@ -36,16 +36,34 @@
     <section class="card">
       <h2><span class="step">1</span> Proje</h2>
 
-      <label class="field">
+      <div class="field">
         <span class="label">Ren'Py proje ZIP dosyası</span>
         <div class="dropzone" id="dropzone">
-          <input type="file" id="project_zip" name="project_zip" accept=".zip" required>
+          <input type="file" id="project_zip" name="project_zip" accept=".zip">
           <div class="dropzone-inner">
             <strong id="zip-name">Dosyayı sürükleyin ya da seçin</strong>
             <small>İçinde <code>game/</code> klasörü olan klasörü zip'leyin</small>
           </div>
         </div>
-      </label>
+
+        <div class="upload-progress" id="upload-progress" hidden>
+          <div class="upload-bar"><span id="upload-bar-fill"></span></div>
+          <div class="upload-meta">
+            <span id="upload-status">Yükleniyor…</span>
+            <button type="button" class="mini ghost" id="upload-cancel">İptal</button>
+          </div>
+        </div>
+
+        <small class="hint">
+          Yüklenen dosya Space kapanana kadar önbellekte kalır; aynı oyunu
+          tekrar derlerken yeniden yüklemeniz gerekmez.
+        </small>
+      </div>
+
+      <div class="field" id="cache-field" hidden>
+        <span class="label">Önbellekteki projeler <small id="cache-size"></small></span>
+        <div class="cache-list" id="cache-list"></div>
+      </div>
 
       <div class="grid-2">
         <label class="field">
