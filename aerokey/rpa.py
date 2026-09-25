@@ -213,6 +213,22 @@ class ExtractResult:
     overwritten: int = 0
     # Arşiv, yerine boş bir arşiv yazılarak boşaltıldı mı.
     emptied: bool = False
+    # TEŞHİS İÇİN: arşiv dizinindeki HAM girdi adlarından bir örnek
+    # (çözülmeden önce, ilk birkaçı). Arşivi paketleyen araç yolları
+    # "game/" önekiyle mi yoksa öneksiz mi sakladığını buradan görürüz —
+    # bu, "dosyalar açıldı" deyip aslında yanlış yere yazma sınıfı
+    # hataları gözle görülür kılar.
+    sample_entries: list[str] = field(default_factory=list)
+    # Gerçekten YAZILAN dosyaların uzantı dağılımı ({".rpyc": 12, ...}).
+    extensions: dict[str, int] = field(default_factory=dict)
+    # "Zaten mevcut olduğu için atlandı" durumundaki dosyaların ADLARI
+    # (yalnızca sayı değil). Kaç tanesinin gerçekten önemli bir dosya
+    # (örn. script.rpy) olduğunu görmek için.
+    overwritten_names: list[str] = field(default_factory=list)
+
+
+_SAMPLE_ENTRY_LIMIT = 8
+_OVERWRITTEN_NAME_LIMIT = 30
 
 
 def extract(archive: Path, dest: Path) -> ExtractResult:
@@ -235,6 +251,9 @@ def extract(archive: Path, dest: Path) -> ExtractResult:
 
         for raw_name, entries in index.items():
             name = raw_name.decode("utf-8", "replace") if isinstance(raw_name, bytes) else str(raw_name)
+
+            if len(result.sample_entries) < _SAMPLE_ENTRY_LIMIT:
+                result.sample_entries.append(name)
 
             relative = _safe_relative(name)
             if relative is None:
@@ -268,6 +287,8 @@ def extract(archive: Path, dest: Path) -> ExtractResult:
             if target.exists():
                 # Gevşek dosya kazanır; arşivdeki kopyayı atlıyoruz.
                 result.overwritten += 1
+                if len(result.overwritten_names) < _OVERWRITTEN_NAME_LIMIT:
+                    result.overwritten_names.append(str(relative))
                 continue
 
             handle.seek(data_offset)
@@ -276,6 +297,9 @@ def extract(archive: Path, dest: Path) -> ExtractResult:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(payload)
             result.files += 1
+
+            uzanti = target.suffix.lower() or "(uzantısız)"
+            result.extensions[uzanti] = result.extensions.get(uzanti, 0) + 1
 
     return result
 

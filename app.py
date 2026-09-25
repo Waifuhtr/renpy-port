@@ -511,14 +511,51 @@ def _extract_rpa_archives(job: BuildJob, project_root: Path) -> bool:
         return False
 
     total = 0
+    tum_uzantilar: dict[str, int] = {}
     for result in results:
         total += result.files
+        for uzanti, sayi in result.extensions.items():
+            tum_uzantilar[uzanti] = tum_uzantilar.get(uzanti, 0) + sayi
+
         detail = f"  - {result.archive.name}: {result.files} dosya"
         if result.overwritten:
             detail += f", {result.overwritten} tanesi zaten mevcut olduğu için atlandı"
         if result.skipped:
             detail += f", {len(result.skipped)} güvensiz ad atlandı"
         job.log(detail)
+
+        # TEŞHİS: arşivin HAM girdi adlarından bir örnek. Bunu her zaman
+        # gösteriyoruz — paketleyen aracın yolları "game/" önekiyle mi
+        # yoksa öneksiz mi sakladığını, sorun çıkmadan önce bile burada
+        # görmek mümkün.
+        if result.sample_entries:
+            ornek = ", ".join(repr(e) for e in result.sample_entries[:5])
+            job.log(f"      örnek girdi adları: {ornek}")
+
+        if result.overwritten_names:
+            gosterilecek = result.overwritten_names[:10]
+            liste = ", ".join(gosterilecek)
+            if len(result.overwritten_names) > len(gosterilecek):
+                kalan = len(result.overwritten_names) - len(gosterilecek)
+                liste += f", … ve {kalan} tane daha"
+            job.log(f"      atlanan (zaten mevcut) dosyalar: {liste}")
+
+    if tum_uzantilar:
+        siralanmis = sorted(tum_uzantilar.items(), key=lambda kv: -kv[1])
+        ozet = ", ".join(f"{uz}: {sayi}" for uz, sayi in siralanmis[:12])
+        job.log(f"  Açılan dosyaların uzantı dağılımı: {ozet}")
+        betik_sayisi = sum(
+            sayi for uz, sayi in tum_uzantilar.items()
+            if uz in (".rpy", ".rpyc", ".rpym", ".rpymc")
+        )
+        if betik_sayisi == 0:
+            job.log(
+                "  UYARI: açılan dosyalar arasında hiç .rpy/.rpyc/.rpym/"
+                ".rpymc yok. Oyunun script'leri bu arşivlerin dışında bir "
+                "yerde olmalı; aksi halde oyun hiçbir etiket içermeyen bir "
+                "APK olarak paketlenir ve telefonda 'could not find label "
+                "start' gibi bir hatayla anında çöker."
+            )
 
     bosaltilan = sum(1 for r in results if r.emptied)
     job.log(
@@ -578,6 +615,43 @@ def _apply_fix_files(job: BuildJob, project_root: Path, req: "BuildRequest") -> 
         "değişmedi; bu yalnızca derleme kopyasında geçerli."
     )
     return True
+
+
+def _debug_game_dir_listing(project_root: Path, sample_limit: int = 25) -> str:
+    """
+    `game/` klasörünün GERÇEK içeriğinin kısa bir dökümü.
+
+    Yalnızca teşhis amaçlı: bir sayının ("0 betik tarandı") arkasındaki
+    zemin gerçeğini göstermek için. `.rglob` ile tüm ağacı taramak büyük
+    projelerde pahalı olabileceği için yalnızca üst düzey girdileri ve
+    uzantı dağılımını çıkarıyoruz.
+    """
+    game_dir = project_root / "game"
+    if not game_dir.is_dir():
+        return f"      game/ klasörü yok ({game_dir})."
+
+    ust_duzey = sorted(p.name + ("/" if p.is_dir() else "") for p in game_dir.iterdir())
+    uzantilar: dict[str, int] = {}
+    toplam = 0
+    for p in game_dir.rglob("*"):
+        if not p.is_file():
+            continue
+        toplam += 1
+        uzanti = p.suffix.lower() or "(uzantısız)"
+        uzantilar[uzanti] = uzantilar.get(uzanti, 0) + 1
+
+    satirlar = [f"      game/ altında toplam {toplam} dosya."]
+    if uzantilar:
+        siralanmis = sorted(uzantilar.items(), key=lambda kv: -kv[1])
+        satirlar.append(
+            "      uzantı dağılımı: "
+            + ", ".join(f"{uz}: {sayi}" for uz, sayi in siralanmis[:15])
+        )
+    gosterilecek = ust_duzey[:sample_limit]
+    satirlar.append(f"      üst düzey girdiler: {', '.join(gosterilecek) or '(boş)'}")
+    if len(ust_duzey) > len(gosterilecek):
+        satirlar.append(f"      … ve {len(ust_duzey) - len(gosterilecek)} girdi daha.")
+    return "\n".join(satirlar)
 
 
 def _sdk_for_version(roots: list[Path], version: str) -> Optional[Path]:
@@ -2831,6 +2905,18 @@ def _execute_build(
         job.log(
             f"\nUyarı: derleme meta verisi hazırlanamadı ({dump_result.note}). "
             "Ren'Py bunu kendisi toplamayı deneyecek."
+        )
+
+    if dump_result.scanned_files == 0:
+        # TEŞHİS: game/ klasöründe GERÇEKTEN hiç .rpy/.rpyc yok mu, yoksa
+        # tarayıcı mı bir şeyi kaçırıyor? Doğrudan dosya sistemine bakıp
+        # zemin gerçeğini gösteriyoruz — bir sonraki tur beklemeden.
+        job.log(
+            "  UYARI: game/ klasöründe hiçbir Ren'Py betiği bulunamadı "
+            "(.rpy/.rpyc/.rpym/.rpymc). Bu ciddi bir paketleme sorununa "
+            "işaret ediyor; muhtemelen oyun hiçbir 'label' içermeyen bir "
+            "APK olarak paketlenecek ve telefonda anında çökecek.\n"
+            f"{_debug_game_dir_listing(project_root)}"
         )
 
     # --- Kaynak durumu ----------------------------------------------------
