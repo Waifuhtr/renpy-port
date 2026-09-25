@@ -58,6 +58,7 @@ from aerokey import legacy  # noqa: E402
 from aerokey import overlay  # noqa: E402
 from aerokey import browse as browse_mod  # noqa: E402
 from aerokey import rpycfile  # noqa: E402
+from aerokey import zipcheck  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
@@ -132,8 +133,15 @@ DATA_DIR, DATA_IS_PERSISTENT = _resolve_data_dir()
 # WORK_ROOT'un altına DEĞİL: oradaki 6 saatlik otomatik temizlik ("iş
 # klasörleri") buraya uğramamalı — yükleme önbelleğinin ömrü kendi LRU
 # mantığıyla (aerokey/uploads.py) yönetiliyor.
+# Kaçış kapısı: kalıcı disk şüpheliyse (ağ birimi, atlamalı okumalarda
+# bozuk veri) AEROKEY_UPLOAD_CACHE_TMP=1 ile önbellek geçici diske
+# alınır. Proje her Space yeniden başlatmasında bir kez yüklenir ama
+# depolama kaynaklı bozulma ihtimali tamamen ortadan kalkar.
+UPLOAD_CACHE_TMP = os.environ.get("AEROKEY_UPLOAD_CACHE_TMP", "").strip().lower() in (
+    "1", "true", "yes", "on"
+)
 UPLOADS_ROOT = (
-    (DATA_DIR / "uploads") if DATA_IS_PERSISTENT
+    (DATA_DIR / "uploads") if (DATA_IS_PERSISTENT and not UPLOAD_CACHE_TMP)
     else Path(tempfile.gettempdir()) / "renpy_android_uploads"
 )
 UPLOADS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -2501,51 +2509,119 @@ def _execute_build(
         )
     else:
         job.log("Proje ZIP dosyası açılıyor…")
-    # Açmadan ÖNCE denetle: bozuksa sebebini kanıtlarıyla söyleyebilelim.
-    saglik = _zip_sagligi(req.zip_path)
+    # --- Dosyayı YEREL diske al ------------------------------------------
+    #
+    # Kalıcı disk (Storage Buckets) bir AĞ BİRİMİ. Yükleme oraya SIRALI
+    # yazıyor, doğrulama dosyanın SONUNU okuyor; açma ise 784 MB'lık
+    # dosyanın her yerine ATLAYARAK erişiyor. Bu üç erişim biçiminin
+    # aynı veriyi vermesi garanti değil — kullanıcı, dosyayı silip
+    # yeniden yükledikten SONRA bile "Bad magic number for file header"
+    # almaya devam etti; yani sorun tek bir bozuk yüklemede değildi.
+    #
+    # Bu yüzden dosyayı önce yerel diske SIRALI kopyalayıp SHA-256'sını
+    # karşılaştırıyoruz. Tutmuyorsa sorunun DİSKTE olduğu kanıtlanmış
+    # olur; tutuyorsa dosyanın kendisi bozuk demektir. Açma da artık
+    # yerel kopyadan yapılıyor.
+    yerel_zip = job_dir / "proje.zip"
+    kopya: Optional[zipcheck.KopyaSonuc] = None
+
+    # Kopya, ZIP kadar yer istiyor. Yer yoksa kopyalamak durumu
+    # KÖTÜLEŞTİRİR; o durumda doğrudan özgün dosyadan açıyoruz.
+    try:
+        bos = shutil.disk_usage(str(job_dir)).free
+        gereken = int(req.zip_path.stat().st_size * 1.15)
+    except OSError:
+        bos, gereken = 0, 0
+
+    if gereken and bos < gereken:
+        job.log(
+            f"Uyarı: Yerel kopya için yeterli yer yok "
+            f"({bos / (1024 ** 3):.1f} GB boş, ~{gereken / (1024 ** 3):.1f} GB "
+            "gerekli). Dosya doğrudan önbellekten açılacak."
+        )
+        yerel_zip = req.zip_path
+    else:
+        kopya = zipcheck.yerel_kopya(
+            req.zip_path, yerel_zip, kaynak.sha256 if kaynak else ""
+        )
+        if not kopya.ok:
+            job.log(
+                f"Hata: Proje dosyası yerel diske alınamadı: {kopya.hata}\n"
+                + "\n".join(_disk_durumu(job_dir))
+            )
+            job.status = "error"
+            return
+
+    if kopya is not None and kopya.ozet_tutuyor is False:
+        job.log(
+            "Hata: Proje dosyası diskte BOZULMUŞ.\n"
+            f"  - yüklenirken kaydedilen SHA-256: {kaynak.sha256[:32]}…\n"
+            f"  - şimdi okunan SHA-256          : {kopya.sha256[:32]}…\n"
+            f"  - diskteki boyut: {kopya.boyut:,} bayt"
+            + (f" (kayıtlı: {kaynak.recorded_size:,})" if kaynak else "")
+            + "\n" + "\n".join(_disk_durumu(job_dir))
+            + "\n  Bu, dosyanın yüklendikten SONRA değiştiği anlamına "
+            "geliyor — yükleme hatası değil, DEPOLAMA sorunu. Kalıcı "
+            "diski (Storage Buckets) kapatıp tekrar denerseniz proje "
+            "geçici diskte tutulur ve bu sorun ortadan kalkar."
+        )
+        _bozugu_onbellekten_cikar(job, req)
+        job.status = "error"
+        return
+
+    if kopya is not None and kopya.ozet_tutuyor is True:
+        job.log("Yerel kopya alındı; SHA-256 yüklemedekiyle AYNI.")
+
+    # --- Açmadan ÖNCE derin denetim --------------------------------------
+    #
+    # `namelist()` yetmiyor: merkezi dizin sağlamken üyelerin YEREL
+    # başlıkları bozuk olabiliyor ve açma o zaman "Bad magic number for
+    # file header" ile düşüyor. Ölçülerek doğrulandı. Burada her üyenin
+    # başlığı yerinde okunup doğrulanıyor.
+    saglik = zipcheck.derin_denetle(yerel_zip)
     if not saglik.ok:
         job.log(
-            "Hata: Önbellekteki proje dosyası açılabilir bir ZIP arşivi "
-            "değil.\n" + "\n".join(_bozuk_zip_teshisi(kaynak, req.zip_path, saglik))
+            "Hata: Proje ZIP dosyası açılabilir durumda değil.\n"
+            + "\n".join(_derin_teshis(kaynak, yerel_zip, kopya, saglik))
         )
-        # Bozuk girdiyi önbellekte BIRAKMIYORUZ: kullanıcı aynı bozuk
-        # dosyayla tekrar tekrar denemesin.
-        if req.zip_cached_id:
-            # "Kullanımda" işaretini bırakıyoruz ki silinebilsin.
-            # `zip_cached_id` bilerek DEĞİŞTİRİLMİYOR: run_build'in
-            # kapanış bloğu tekrar release çağıracak, o da artık
-            # olmayan bir girdi için zararsız biçimde hiçbir şey
-            # yapmıyor. Kimliği boşaltsaydık kapanış bloğu bu kez
-            # dosyayı "geçici girdi" sanıp silmeye çalışırdı.
-            UPLOADS.release(req.zip_cached_id)
-            silindi = UPLOADS.remove(req.zip_cached_id)
-            job.log(
-                "Bozuk girdi önbellekten çıkarıldı; projeyi yeniden yükleyin."
-                if silindi else
-                "Bozuk girdi önbellekten çıkarılamadı; listeden elle silin."
-            )
+        _bozugu_onbellekten_cikar(job, req)
         job.status = "error"
         return
 
     job.log(
         f"ZIP doğrulandı: {saglik.girdi_sayisi:,} girdi, "
-        f"{saglik.boyut / (1024 * 1024):.1f} MB."
+        f"{saglik.boyut / (1024 * 1024):.1f} MB "
+        "(her üyenin başlığı tek tek denetlendi)."
     )
 
     try:
-        with zipfile.ZipFile(req.zip_path) as zf:
+        with zipfile.ZipFile(yerel_zip) as zf:
             zf.extractall(project_extract_dir)
-    except zipfile.BadZipFile as exc:
-        job.log(f"Hata: ZIP açılırken bozuldu: {exc}")
-        job.status = "error"
-        return
-    except OSError as exc:
+    except (zipfile.BadZipFile, OSError, EOFError, RuntimeError) as exc:
+        # Derin denetimi geçip yine de patladıysa, tek tek açmayı
+        # deniyoruz: bir oyunun tek bozuk ses dosyası yüzünden tüm
+        # derlemeyi iptal etmek gereksiz, ama HANGİ dosyaların
+        # açılamadığını bilmek şart.
         job.log(
-            f"Hata: ZIP açılamadı: {exc}\n"
-            "Disk dolmuş olabilir; Space'i yeniden başlatıp tekrar deneyin."
+            f"Uyarı: Toplu açma başarısız oldu ({exc}). "
+            "Dosyalar tek tek açılıyor…"
         )
-        job.status = "error"
-        return
+        _guvenli_temizle(project_extract_dir)
+        sonuc = zipcheck.uye_uye_cikar(yerel_zip, project_extract_dir)
+        if sonuc.hata or not sonuc.basarili:
+            job.log(
+                f"Hata: Proje ZIP dosyası açılamadı: {sonuc.hata or exc}\n"
+                + "\n".join(_derin_teshis(kaynak, yerel_zip, kopya, saglik))
+            )
+            _bozugu_onbellekten_cikar(job, req)
+            job.status = "error"
+            return
+        job.log(
+            f"  {sonuc.basarili:,} dosya açıldı, {len(sonuc.bozuk)} tanesi "
+            "BOZUK olduğu için atlandı:\n"
+            + "\n".join(f"    - {a}" for a in sonuc.bozuk[:20])
+            + ("\n    …" if len(sonuc.bozuk) > 20 else "")
+        )
 
     project_root = _find_project_root(project_extract_dir)
     if project_root is None:
@@ -3363,115 +3439,107 @@ async def _save_upload(upload: Optional[UploadFile], suffix: str) -> Optional[Pa
     return path
 
 
-@dataclass
-class ZipSagligi:
-    """Bir ZIP dosyasının gerçekten açılabilir olup olmadığının sonucu."""
+def _disk_durumu(yol: Path) -> list[str]:
+    """Bir yolun bulunduğu diskin doluluk bilgisini satır olarak verir."""
+    satirlar: list[str] = []
+    for etiket, hedef in (("iş diski", yol), ("önbellek diski", UPLOADS_ROOT)):
+        try:
+            k = shutil.disk_usage(str(hedef))
+            satirlar.append(
+                f"  - {etiket}: {k.free / (1024 ** 3):.2f} GB boş / "
+                f"{k.total / (1024 ** 3):.2f} GB"
+            )
+        except OSError:
+            continue
+    return satirlar
 
-    ok: bool
-    girdi_sayisi: int = 0
-    hata: str = ""
-    boyut: int = 0
+
+def _guvenli_temizle(yol: Path) -> None:
+    shutil.rmtree(yol, ignore_errors=True)
+    yol.mkdir(parents=True, exist_ok=True)
 
 
-def _zip_sagligi(path: Path) -> ZipSagligi:
+def _derin_teshis(
+    entry: Optional[upload_cache.CachedUpload],
+    yol: Path,
+    kopya: Optional["zipcheck.KopyaSonuc"],
+    saglik: "zipcheck.ZipDurum",
+) -> list[str]:
     """
-    ZIP'i GERÇEKTEN açarak denetler.
+    Bozuk bir ZIP için elde edilebilir TÜM kanıtı toplar.
 
-    Neden `zipfile.is_zipfile` yetmiyor: o fonksiyon yalnızca dosyanın
-    SONUNDAKİ "merkezi dizin sonu" (EOCD) kaydını arar. Merkezi dizinin
-    KENDİSİ bozuksa — dosya doğru uzunlukta ama içindeki bazı bloklar
-    sıfırlanmışsa — `is_zipfile` yine True döner, ama `ZipFile(...)`
-    açılırken "Bad magic number for central directory" ile patlar.
-
-    Bu, ölçülerek doğrulandı: merkezi dizini bozulmuş bir dosyada
-    `is_zipfile` True, `ZipFile` ise BadZipFile veriyor. Yükleme bu
-    yüzden "başarılı" görünüp derleme "geçerli bir ZIP değil" diyordu.
-
-    Artık yükleme anında da, derleme başlarken de bu denetim yapılıyor.
-    """
-    try:
-        boyut = path.stat().st_size
-    except OSError as exc:
-        return ZipSagligi(ok=False, hata=f"dosya okunamadı: {exc}")
-
-    if boyut == 0:
-        return ZipSagligi(ok=False, hata="dosya boş (0 bayt)", boyut=0)
-
-    try:
-        with zipfile.ZipFile(path) as zf:
-            adlar = zf.namelist()
-    except zipfile.BadZipFile as exc:
-        return ZipSagligi(ok=False, hata=f"ZIP dizini okunamadı: {exc}", boyut=boyut)
-    except OSError as exc:
-        return ZipSagligi(ok=False, hata=f"dosya okunamadı: {exc}", boyut=boyut)
-
-    if not adlar:
-        return ZipSagligi(ok=False, hata="ZIP boş (hiç dosya yok)", boyut=boyut)
-
-    return ZipSagligi(ok=True, girdi_sayisi=len(adlar), boyut=boyut)
-
-
-def _dosya_sha256(path: Path) -> str:
-    """Dosyanın SHA-256'sını diskten okuyarak hesaplar."""
-    hasher = hashlib.sha256()
-    try:
-        with path.open("rb") as fh:
-            for chunk in iter(lambda: fh.read(4 * 1024 * 1024), b""):
-                hasher.update(chunk)
-    except OSError:
-        return ""
-    return hasher.hexdigest()
-
-
-def _bozuk_zip_teshisi(entry: Optional[upload_cache.CachedUpload], path: Path,
-                       saglik: ZipSagligi) -> list[str]:
-    """
-    Bozuk bir önbellek dosyası için ELDE EDİLEBİLİR tüm kanıtı toplar.
-
-    Amaç, "geçerli bir ZIP değil" gibi tek satırlık bir çıkmaz yerine
-    sorunun NEREDE olduğunu ayırt etmek: dosya diskte mi kısaldı, içeriği
-    mi değişti, yoksa hiç geçerli olmadan mı yüklendi.
+    Amaç, "ZIP bozuk" demekle yetinmeyip sorunun nerede olduğunu ayırt
+    etmek: dosya diskte mi değişti, yüklenirken mi bozuldu, yoksa
+    kullanıcının kendi dosyası mı zaten bozuk.
     """
     satirlar = [f"  - hata: {saglik.hata}"]
-    satirlar.append(f"  - diskteki boyut: {saglik.boyut:,} bayt")
+    if saglik.bozuk_uye:
+        satirlar.append(f"  - bozuk üye: {saglik.bozuk_uye}")
+    if saglik.bozuk_konum >= 0:
+        satirlar.append(f"  - dosya içindeki konumu: {saglik.bozuk_konum:,}. bayt")
+    if saglik.gorulen_baytlar:
+        satirlar.append(
+            f"  - orada beklenen 'PK\\x03\\x04' yerine: {saglik.gorulen_baytlar}"
+        )
+    if saglik.girdi_sayisi:
+        satirlar.append(f"  - dizinde görünen girdi sayısı: {saglik.girdi_sayisi:,}")
+    if saglik.onek_baytlari:
+        satirlar.append(
+            f"  - dosyanın başında {saglik.onek_baytlari:,} baytlık fazladan veri var"
+        )
+    kopya_boyut = kopya.boyut if kopya is not None else 0
+    kopya_sha = kopya.sha256 if kopya is not None else ""
+    satirlar.append(f"  - diskteki boyut: {saglik.boyut or kopya_boyut:,} bayt")
 
     if entry is not None:
         if entry.recorded_size:
             satirlar.append(
                 f"  - yüklenirken kaydedilen boyut: {entry.recorded_size:,} bayt"
             )
-            if entry.recorded_size != saglik.boyut:
+            if entry.recorded_size != (saglik.boyut or kopya_boyut):
                 satirlar.append(
-                    "  - BOYUT UYUŞMUYOR: dosya yüklendikten SONRA diskte "
-                    "değişmiş/kısalmış."
+                    "  - BOYUT UYUŞMUYOR: dosya yüklendikten sonra değişmiş."
                 )
-        if entry.sha256:
-            simdiki = _dosya_sha256(path)
-            if not simdiki:
-                satirlar.append("  - SHA-256 yeniden hesaplanamadı (okuma hatası).")
-            elif simdiki == entry.sha256:
+        if entry.sha256 and kopya_sha:
+            if kopya_sha == entry.sha256:
                 satirlar.append(
                     "  - SHA-256 AYNI: dosya diskte bozulmamış. Demek ki "
-                    "yüklenen dosyanın kendisi zaten geçerli bir ZIP değildi."
+                    "yüklediğiniz ZIP'in kendisi bu hâlde geldi."
                 )
             else:
                 satirlar.append(
                     f"  - SHA-256 FARKLI (kayıtlı {entry.sha256[:16]}…, "
-                    f"şimdi {simdiki[:16]}…): dosyanın içeriği yüklendikten "
-                    "sonra DEĞİŞMİŞ. Bu neredeyse her zaman kalıcı diskin "
-                    "dolması ya da yazmanın yarıda kalması demektir."
+                    f"şimdi {kopya_sha[:16]}…): dosya yüklendikten SONRA "
+                    "değişmiş — depolama sorunu."
                 )
 
-    try:
-        kullanim = shutil.disk_usage(str(path.parent))
-        satirlar.append(
-            f"  - önbellek diski: {kullanim.free / (1024 ** 3):.2f} GB boş / "
-            f"{kullanim.total / (1024 ** 3):.2f} GB toplam"
-        )
-    except OSError:
-        pass
-
+    satirlar.extend(_disk_durumu(yol.parent))
+    satirlar.append(
+        "  - Ne yapmalı: ZIP'i kendi bilgisayarınızda açıp bozuk olmadığını "
+        "doğrulayın. Açılıyorsa sorun yüklemede ya da depolamadadır; "
+        "kalıcı diski kapatıp tekrar denemek bunu ayırt eder."
+    )
     return satirlar
+
+
+def _bozugu_onbellekten_cikar(job: BuildJob, req: "BuildRequest") -> None:
+    """
+    Bozuk önbellek girdisini listeden düşürür.
+
+    `zip_cached_id` bilerek DEĞİŞTİRİLMİYOR: run_build'in kapanış bloğu
+    tekrar release çağıracak, o da artık olmayan bir girdi için zararsız
+    biçimde hiçbir şey yapmıyor. Kimliği boşaltsaydık kapanış bloğu bu
+    kez dosyayı "geçici girdi" sanıp silmeye çalışırdı.
+    """
+    if not req.zip_cached_id:
+        return
+    UPLOADS.release(req.zip_cached_id)
+    silindi = UPLOADS.remove(req.zip_cached_id)
+    job.log(
+        "Bozuk girdi önbellekten çıkarıldı; projeyi yeniden yükleyin."
+        if silindi else
+        "Bozuk girdi önbellekten çıkarılamadı; listeden elle silin."
+    )
 
 
 async def _stream_to_cache(upload: UploadFile) -> upload_cache.CachedUpload:
@@ -3533,24 +3601,50 @@ async def api_upload(project_zip: UploadFile = File(...)) -> JSONResponse:
         UPLOADS.remove(entry.id)
         raise HTTPException(status_code=400, detail="Yüklenen dosya boş.")
 
-    # `is_zipfile` YETMİYOR: yalnızca dosyanın sonundaki kaydı arıyor ve
-    # merkezi dizini bozuk bir dosyayı kabul ediyor. Böyle bir dosya
-    # yüklemede "başarılı" görünüp derlemede "geçerli bir ZIP değil"
-    # diyordu. Artık burada gerçekten açıyoruz.
-    saglik = _zip_sagligi(UPLOADS.path_of(entry.id))
-    if not saglik.ok:
-        teshis = _bozuk_zip_teshisi(entry, UPLOADS.path_of(entry.id), saglik)
+    yol = UPLOADS.path_of(entry.id)
+
+    # 1) Diske yazılan baytlar, akıştan hesapladığımızla AYNI mı?
+    #    Bu, yazma sırasında bozulmayı yakalar. Özet akıştan
+    #    hesaplandığı için diski yeniden okumak gerçek bir denetim.
+    diskteki = zipcheck.sha256_of(yol)
+    if diskteki and entry.sha256 and diskteki != entry.sha256:
         print(
-            "Yükleme reddedildi (bozuk ZIP):\n" + "\n".join(teshis),
+            "Yükleme reddedildi (diske yazarken bozuldu):\n"
+            f"  - akıştan: {entry.sha256}\n  - diskten: {diskteki}",
             flush=True,
         )
         UPLOADS.remove(entry.id)
         raise HTTPException(
+            status_code=500,
+            detail=(
+                "Dosya diske yazılırken bozuldu (yazılan baytlar "
+                "gönderilenlerle aynı değil). Bu bir depolama sorunu; "
+                "tekrar deneyin. Sürerse kalıcı diski (Storage Buckets) "
+                "kapatıp deneyin."
+            ),
+        )
+
+    # 2) `is_zipfile` ve `namelist()` YETMİYOR: merkezi dizin sağlamken
+    #    üyelerin YEREL başlıkları bozuk olabiliyor ve açma o zaman
+    #    "Bad magic number for file header" ile düşüyor. Ölçülerek
+    #    doğrulandı. Burada her üyenin başlığı tek tek denetleniyor.
+    saglik = zipcheck.derin_denetle(yol)
+    if not saglik.ok:
+        ayrinti = [f"  - hata: {saglik.hata}"]
+        if saglik.bozuk_uye:
+            ayrinti.append(f"  - bozuk üye: {saglik.bozuk_uye}")
+        if saglik.bozuk_konum >= 0:
+            ayrinti.append(f"  - konum: {saglik.bozuk_konum}")
+        ayrinti.append(f"  - boyut: {saglik.boyut}")
+        print("Yükleme reddedildi (bozuk ZIP):\n" + "\n".join(ayrinti), flush=True)
+        UPLOADS.remove(entry.id)
+        uye = f" (ilk bozuk dosya: {saglik.bozuk_uye})" if saglik.bozuk_uye else ""
+        raise HTTPException(
             status_code=400,
             detail=(
                 "Yüklenen dosya açılabilir bir ZIP arşivi değil — "
-                f"{saglik.hata}. Dosya sunucuya "
-                f"{saglik.boyut / (1024 * 1024):.1f} MB olarak ulaştı. "
+                f"{saglik.hata}{uye}. Sunucuya "
+                f"{saglik.boyut / (1024 * 1024):.1f} MB ulaştı. "
                 "Yükleme yarıda kalmış olabilir; tekrar deneyin. Sorun "
                 "sürerse ZIP'i bilgisayarınızda açıp bozuk olmadığından "
                 "emin olun."
@@ -3569,7 +3663,7 @@ async def api_uploads() -> JSONResponse:
             "uploads": [e.public() for e in entries],
             "total_bytes": sum(e.size for e in entries),
             "free_bytes": UPLOADS.free_bytes(),
-            "persistent": DATA_IS_PERSISTENT,
+            "persistent": DATA_IS_PERSISTENT and not UPLOAD_CACHE_TMP,
         }
     )
 
@@ -3845,7 +3939,7 @@ async def api_auto_keystore_info() -> JSONResponse:
             "alias": alias,
             "password": password,
             "just_created": created,
-            "persistent": DATA_IS_PERSISTENT,
+            "persistent": DATA_IS_PERSISTENT and not UPLOAD_CACHE_TMP,
         }
     )
 
