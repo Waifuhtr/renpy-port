@@ -17,7 +17,7 @@
    * şey olmuyor" gibi görünüyordu. Artık bu durum sayfanın en üstünde
    * açıkça yazıyor.
    */
-  const ARAYUZ_SURUMU = "31";
+  const ARAYUZ_SURUMU = "32";
 
   const $ = (id) => document.getElementById(id);
 
@@ -61,8 +61,26 @@
   }
 
   // Şerit metnini seçmek için: arayüz dosyaları uyumsuz mu?
-  // Bilerek genel hata dinleyicilerinden ÖNCE tanımlanıyor.
+  // Bilerek genel hata dinleyicilerinden ÖNCE tanımlanıyor: hata
+  // kurulumun ilk satırlarında oluşsa bile bu değişkenler hazır olmalı,
+  // yoksa hata bildiricinin KENDİSİ "before initialization" ile patlar.
   let arayuzUyumsuz = false;
+  let hataBildiriliyor = false;
+
+  /**
+   * Öğe yoksa sessizce vazgeçen dinleyici bağlayıcı.
+   *
+   * `$("x").addEventListener(...)` ifadesi, öğe HTML'de yoksa TypeError
+   * fırlatıyor ve bu kurulum kodunun geri kalanını TAMAMEN düşürüyor —
+   * yani index.html bir sürüm geride kalırsa sayfadaki her şey ölüyor.
+   * Eksikliği zaten `arayuzuDenetle` bildiriyor; burada devam ediyoruz.
+   */
+  function dinle(id, olay, islev, secenek) {
+    const el = $(id);
+    if (!el) return false;
+    el.addEventListener(olay, islev, secenek);
+    return true;
+  }
 
   // Hiçbir JavaScript hatası artık sessiz kalmıyor. Bu dinleyiciler
   // bilerek EN BAŞTA kuruluyor: aşağıdaki kurulum satırlarının kendisi
@@ -99,6 +117,10 @@
       "version-hint", "signing-callout", "keystore-info", "aerokey-body",
       "refresh-game-id", "download-keystore", "show-keystore-info",
       "copy-log", "clear-log",
+      "browse-card", "browse-scan", "browse-filter", "browse-info",
+      "browse-list", "browse-editor", "browse-file", "browse-blocks",
+      "browse-text", "browse-save", "browse-copy", "browse-revert",
+      "browse-close", "browse-status", "browse-edits",
     ];
     const eksik = zorunlu.filter((id) => !document.getElementById(id));
     const htmlSurumu = (document.body && document.body.dataset.arayuz) || "";
@@ -319,7 +341,7 @@
 
   // Kullanıcı yukarı kaydırdıysa otomatik kaydırmayı bırak — uzun bir
   // günlüğü incelerken alta zıplamak sinir bozucudur.
-  consoleEl.addEventListener("scroll", () => {
+  dinle("console", "scroll", () => {
     const nearBottom =
       consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 60;
     autoScroll = nearBottom;
@@ -463,11 +485,11 @@
     xhr.send(data);
   }
 
-  uploadCancel.addEventListener("click", () => {
+  dinle("upload-cancel", "click", () => {
     if (activeUpload) activeUpload.abort();
   });
 
-  zipInput.addEventListener("change", () => {
+  dinle("project_zip", "change", () => {
     const file = zipInput.files && zipInput.files[0];
     if (file) uploadFile(file);
   });
@@ -475,9 +497,13 @@
   // --- Önbellek listesi --------------------------------------------------
 
   function selectUpload(id) {
+    const degisti = selectedUploadId !== id;
     selectedUploadId = id;
     store(UPLOAD_KEY, id);
     renderCacheSelection();
+    // Başka bir projeye geçildiyse gözatma listesi ARTIK GEÇERSİZ:
+    // başka bir projenin dosyalarını göstermek çok yanıltıcı olurdu.
+    if (degisti && typeof browseSifirla === "function") browseSifirla();
   }
 
   function renderCacheSelection() {
@@ -573,20 +599,20 @@
   }
 
   ["dragenter", "dragover"].forEach((evt) =>
-    dropzone.addEventListener(evt, (e) => {
+    dinle("dropzone", evt, (e) => {
       e.preventDefault();
       dropzone.classList.add("dragover");
     })
   );
 
   ["dragleave", "drop"].forEach((evt) =>
-    dropzone.addEventListener(evt, (e) => {
+    dinle("dropzone", evt, (e) => {
       e.preventDefault();
       dropzone.classList.remove("dragover");
     })
   );
 
-  dropzone.addEventListener("drop", (e) => {
+  dinle("dropzone", "drop", (e) => {
     const files = e.dataTransfer && e.dataTransfer.files;
     if (files && files.length) uploadFile(files[0]);
   });
@@ -596,11 +622,11 @@
   const aerokeyToggle = $("aerokey_enabled");
   const aerokeyBody = $("aerokey-body");
 
-  aerokeyToggle.addEventListener("change", () => {
+  dinle("aerokey_enabled", "change", () => {
     aerokeyBody.hidden = !aerokeyToggle.checked;
   });
 
-  $("refresh-game-id").addEventListener("click", async () => {
+  dinle("refresh-game-id", "click", async () => {
     const pkg = $("manual_package").value.trim();
     try {
       const res = await fetch(`/api/game-id?package=${encodeURIComponent(pkg)}`);
@@ -618,11 +644,11 @@
 
   // --- İmza anahtarı -----------------------------------------------------
 
-  $("download-keystore").addEventListener("click", () => {
+  dinle("download-keystore", "click", () => {
     window.location.href = "/api/keystore/auto";
   });
 
-  $("show-keystore-info").addEventListener("click", async () => {
+  dinle("show-keystore-info", "click", async () => {
     const box = $("keystore-info");
     if (!box.hidden) {
       box.hidden = true;
@@ -648,7 +674,7 @@
 
   // --- Günlük araçları ---------------------------------------------------
 
-  $("copy-log").addEventListener("click", async () => {
+  dinle("copy-log", "click", async () => {
     if (!logBuffer.length) return toast("Kopyalanacak bir şey yok.");
     try {
       await navigator.clipboard.writeText(logBuffer.join("\n"));
@@ -658,7 +684,290 @@
     }
   });
 
-  $("clear-log").addEventListener("click", resetConsole);
+  dinle("clear-log", "click", resetConsole);
+
+  // --- Dosyaları gözat / düzenle -----------------------------------------
+
+  let browseEntries = [];
+  let browseEdits = [];
+  let browseOpen = null;   // { path, kind, blocks }
+  let browseBlock = null;  // seçili blok (.rpyc için)
+  let browseScanned = null; // taranmış olan yükleme kimliği
+
+  function browseDurum(metin, kotu = false) {
+    const el = $("browse-status");
+    if (!el) return;
+    el.textContent = metin;
+    el.classList.toggle("bad", !!kotu);
+  }
+
+  async function browseIstek(yol, secenek) {
+    const res = await fetch(yol, secenek);
+    if (!res.ok) {
+      const hata = await res.json().catch(() => ({}));
+      throw new Error(hata.detail || `HTTP ${res.status}`);
+    }
+    return res.json();
+  }
+
+  dinle("browse-scan", "click", async () => {
+    if (!selectedUploadId) {
+      toast("Önce bir proje ZIP dosyası seçin.", true);
+      return;
+    }
+    const dugme = $("browse-scan");
+    dugme.disabled = true;
+    $("browse-info").textContent = "Taranıyor… (büyük projelerde bir dakika sürebilir)";
+    try {
+      const veri = await browseIstek(
+        `/api/browse/${selectedUploadId}/scan`, { method: "POST" }
+      );
+      browseScanned = selectedUploadId;
+      browseUygula(veri);
+    } catch (err) {
+      $("browse-info").textContent = "";
+      toast("Tarama başarısız: " + err.message, true);
+    } finally {
+      dugme.disabled = false;
+    }
+  });
+
+  function browseUygula(veri) {
+    browseEntries = veri.entries || [];
+    browseEdits = veri.edits || [];
+    const acilabilir = browseEntries.filter((e) => e.openable).length;
+    $("browse-info").textContent =
+      `${browseEntries.length} dosya · ${acilabilir} tanesi düzenlenebilir` +
+      (veri.archives && veri.archives.length
+        ? ` · ${veri.archives.length} arşivin içi okundu` : "");
+    if (veri.note) appendLine("Gözatma notu:" + veri.note);
+    browseListeyiCiz();
+    browseDuzenlemeleriCiz();
+  }
+
+  function browseListeyiCiz() {
+    const liste = $("browse-list");
+    const arama = ($("browse-filter").value || "").toLowerCase().trim();
+    liste.innerHTML = "";
+
+    const gosterilecek = browseEntries
+      .filter((e) => e.openable)
+      .filter((e) => !arama || e.path.toLowerCase().includes(arama))
+      .slice(0, 300);
+
+    liste.hidden = browseEntries.length === 0;
+    if (!gosterilecek.length) {
+      liste.innerHTML =
+        '<div class="browse-empty">Eşleşen düzenlenebilir dosya yok.</div>';
+      return;
+    }
+
+    gosterilecek.forEach((e) => {
+      const satir = document.createElement("button");
+      satir.type = "button";
+      satir.className = "browse-item" + (e.edited ? " edited" : "");
+      const nereden = e.source.startsWith("rpa:")
+        ? e.source.slice(4) + " içinden" : "ZIP";
+      satir.innerHTML =
+        `<span class="bi-path">${escapeHtml(e.path)}</span>` +
+        `<em>${escapeHtml(e.kind)} · ${humanSize(e.size)} · ` +
+        `${escapeHtml(nereden)}${e.edited ? " · düzenlendi" : ""}</em>`;
+      satir.addEventListener("click", () => browseAc(e.path));
+      liste.appendChild(satir);
+    });
+  }
+
+  dinle("browse-filter", "input", browseListeyiCiz);
+
+  async function browseAc(path) {
+    try {
+      const veri = await browseIstek(
+        `/api/browse/${browseScanned}/file?path=${encodeURIComponent(path)}`
+      );
+      browseOpen = veri;
+      $("browse-editor").hidden = false;
+      $("browse-file").textContent = path;
+      $("browse-revert").hidden = !veri.edited;
+      browseDurum(veri.edited ? "Bu dosyada kayıtlı bir düzenleme var." : "");
+
+      const secici = $("browse-blocks");
+      if (veri.kind === "rpyc") {
+        const bloklar = veri.blocks || [];
+        secici.hidden = false;
+        secici.innerHTML = "";
+        bloklar.forEach((b, i) => {
+          const opt = document.createElement("option");
+          opt.value = String(i);
+          opt.textContent = b.title;
+          secici.appendChild(opt);
+        });
+        if (!bloklar.length) {
+          $("browse-text").value =
+            "(Bu derlenmiş betikte düzenlenebilir bir Python kod bloğu yok.)";
+          $("browse-text").readOnly = true;
+          browseBlock = null;
+        } else {
+          $("browse-text").readOnly = false;
+          browseBlokSec(0);
+        }
+      } else {
+        secici.hidden = true;
+        $("browse-text").readOnly = false;
+        $("browse-text").value = veri.text || "";
+        browseBlock = null;
+      }
+      $("browse-editor").scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } catch (err) {
+      toast("Dosya açılamadı: " + err.message, true);
+    }
+  }
+
+  function browseBlokSec(i) {
+    const bloklar = (browseOpen && browseOpen.blocks) || [];
+    if (!bloklar[i]) return;
+    browseBlock = bloklar[i];
+    $("browse-blocks").value = String(i);
+    $("browse-text").value = browseBlock.source;
+  }
+
+  dinle("browse-blocks", "change", (e) => {
+    browseBlokSec(parseInt(e.target.value, 10) || 0);
+  });
+
+  dinle("browse-save", "click", async () => {
+    if (!browseOpen) return;
+    const govde = {
+      path: browseOpen.path,
+      text: $("browse-text").value,
+    };
+    if (browseOpen.kind === "rpyc") {
+      if (!browseBlock) {
+        browseDurum("Kaydedilecek bir kod bloğu seçili değil.", true);
+        return;
+      }
+      govde.block_index = browseBlock.index;
+      govde.block_line = browseBlock.line;
+    }
+    browseDurum("Kaydediliyor…");
+    try {
+      const veri = await browseIstek(
+        `/api/browse/${browseScanned}/file`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(govde),
+        }
+      );
+      browseEdits = veri.edits || [];
+      browseEntries = browseEntries.map((e) =>
+        e.path === browseOpen.path ? { ...e, edited: true } : e
+      );
+      $("browse-revert").hidden = false;
+      browseDurum("Kaydedildi. Bir sonraki derlemede uygulanacak.");
+      browseListeyiCiz();
+      browseDuzenlemeleriCiz();
+      toast("Düzenleme kaydedildi.");
+    } catch (err) {
+      browseDurum("Kaydedilemedi: " + err.message, true);
+    }
+  });
+
+  dinle("browse-copy", "click", async () => {
+    try {
+      await navigator.clipboard.writeText($("browse-text").value);
+      browseDurum("İçerik panoya kopyalandı.");
+    } catch (err) {
+      browseDurum("Panoya erişilemedi; metni elle seçip kopyalayın.", true);
+    }
+  });
+
+  dinle("browse-revert", "click", async () => {
+    if (!browseOpen) return;
+    try {
+      const veri = await browseIstek(
+        `/api/browse/${browseScanned}/file?path=` +
+        encodeURIComponent(browseOpen.path),
+        { method: "DELETE" }
+      );
+      browseEdits = veri.edits || [];
+      browseEntries = browseEntries.map((e) =>
+        e.path === browseOpen.path ? { ...e, edited: false } : e
+      );
+      browseListeyiCiz();
+      browseDuzenlemeleriCiz();
+      const acik = browseOpen.path;
+      browseOpen = null;
+      browseAc(acik);
+      toast("Düzenleme geri alındı.");
+    } catch (err) {
+      browseDurum("Geri alınamadı: " + err.message, true);
+    }
+  });
+
+  dinle("browse-close", "click", () => {
+    $("browse-editor").hidden = true;
+    browseOpen = null;
+    browseBlock = null;
+  });
+
+  function browseDuzenlemeleriCiz() {
+    const kutu = $("browse-edits");
+    kutu.hidden = !browseEdits.length;
+    if (!browseEdits.length) {
+      kutu.innerHTML = "";
+      return;
+    }
+    kutu.innerHTML =
+      "<strong>Derlemeye uygulanacak düzenlemeler</strong>" +
+      browseEdits
+        .map(
+          (k) =>
+            `<div class="browse-edit"><span>${escapeHtml(k.path)}</span>` +
+            `<em>${escapeHtml(k.summary || "")}</em></div>`
+        )
+        .join("");
+  }
+
+  async function browseYukle() {
+    if (!selectedUploadId) return;
+    try {
+      const veri = await browseIstek(`/api/browse/${selectedUploadId}`);
+      if (!veri.scanned) {
+        browseEntries = [];
+        browseEdits = [];
+        $("browse-info").textContent =
+          "Henüz taranmadı — \u201cTara\u201d düğmesine basın.";
+        $("browse-list").hidden = true;
+        $("browse-edits").hidden = true;
+        return;
+      }
+      browseScanned = selectedUploadId;
+      browseUygula(veri);
+    } catch (err) {
+      /* proje seçili değilse ya da silinmişse sessiz geç */
+    }
+  }
+
+  function browseSifirla() {
+    browseEntries = [];
+    browseEdits = [];
+    browseOpen = null;
+    browseBlock = null;
+    browseScanned = null;
+    const editor = $("browse-editor");
+    if (editor) editor.hidden = true;
+    const liste = $("browse-list");
+    if (liste) { liste.hidden = true; liste.innerHTML = ""; }
+    const duzenlemeler = $("browse-edits");
+    if (duzenlemeler) duzenlemeler.hidden = true;
+    const bilgi = $("browse-info");
+    if (bilgi) bilgi.textContent = "";
+    if ($("browse-card") && $("browse-card").open) browseYukle();
+  }
+
+  dinle("browse-card", "toggle", () => {
+    if ($("browse-card").open) browseYukle();
+  });
 
   // --- Derleme -----------------------------------------------------------
 
@@ -740,7 +1049,7 @@
     }
   }
 
-  form.addEventListener("submit", (e) => {
+  dinle("build-form", "submit", (e) => {
     e.preventDefault();
     let sonuc;
     try {
@@ -759,8 +1068,6 @@
    * onu tekrar buraya getirir; sonsuz döngüyü önlemek için her adım
    * ayrı ayrı korunuyor ve yeniden girişe karşı bir bayrak var.
    */
-  let hataBildiriliyor = false;
-
   function bildirBeklenmedik(err) {
     if (hataBildiriliyor) return;
     hataBildiriliyor = true;

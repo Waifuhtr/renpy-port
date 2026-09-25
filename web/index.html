@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/style.css">
 </head>
-<body data-arayuz="31">
+<body data-arayuz="32">
 
 <div class="aurora" aria-hidden="true">
   <span class="orb orb-a"></span>
@@ -64,6 +64,49 @@
         <span class="label">Önbellekteki projeler <small id="cache-size"></small></span>
         <div class="cache-list" id="cache-list"></div>
       </div>
+
+      <details class="card collapsible sub-card" id="browse-card">
+        <summary>
+          <h2><span class="step">·</span> Dosyaları gözat / düzenle</h2>
+          <span class="summary-note">arşivin içini aç</span>
+        </summary>
+        <div class="collapsible-body">
+          <p class="explain">
+            Yüklediğiniz projenin içini burada açabilirsiniz — ZIP'in
+            içindeki <code>.rpa</code> arşivlerinin içi dahil. Derlemeyi
+            durduran dosyayı bulup doğrudan düzenleyin; 784 MB'lık paketi
+            indirip yeniden yüklemenize gerek yok.
+            <b>Derlenmiş betiklerde</b> (<code>.rpyc</code>) dosyanın
+            içindeki Python kod blokları açılır — derlemeyi durduran kod
+            her zaman onların içindedir.
+          </p>
+
+          <div class="browse-bar">
+            <button type="button" class="mini" id="browse-scan">Tara</button>
+            <input type="search" id="browse-filter" placeholder="dosya ara (ör. poem)">
+            <span class="browse-info" id="browse-info"></span>
+          </div>
+
+          <div class="browse-list" id="browse-list" hidden></div>
+
+          <div class="browse-editor" id="browse-editor" hidden>
+            <div class="browse-editor-head">
+              <strong id="browse-file"></strong>
+              <select id="browse-blocks" hidden></select>
+            </div>
+            <textarea id="browse-text" spellcheck="false" rows="16"></textarea>
+            <div class="browse-actions">
+              <button type="button" class="mini" id="browse-save">Kaydet</button>
+              <button type="button" class="mini ghost" id="browse-copy">Kopyala</button>
+              <button type="button" class="mini ghost" id="browse-revert" hidden>Düzenlemeyi geri al</button>
+              <button type="button" class="mini ghost" id="browse-close">Kapat</button>
+              <span class="browse-status" id="browse-status"></span>
+            </div>
+          </div>
+
+          <div class="browse-edits" id="browse-edits" hidden></div>
+        </div>
+      </details>
 
       <label class="field">
         <span class="label">Düzeltme dosyaları <small>isteğe bağlı</small></span>

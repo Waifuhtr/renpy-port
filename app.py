@@ -56,6 +56,8 @@ from aerokey import rpyfix  # noqa: E402
 from aerokey import uploads as upload_cache  # noqa: E402
 from aerokey import legacy  # noqa: E402
 from aerokey import overlay  # noqa: E402
+from aerokey import browse as browse_mod  # noqa: E402
+from aerokey import rpycfile  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
@@ -580,6 +582,34 @@ def _extract_rpa_archives(job: BuildJob, project_root: Path) -> bool:
         "denetliyor ve dosyayı silmek o denetimi düşürüyordu."
     )
     return True
+
+
+def _apply_browser_edits(
+    job: BuildJob, project_root: Path, req: "BuildRequest"
+) -> None:
+    """
+    "Dosyaları gözat" ekranında kaydedilen düzenlemeleri uygular.
+
+    Bunlar yüklemenin yanında duruyor (projenin 784 MB'lık ZIP'i
+    DEĞİŞTİRİLMİYOR) ve her derlemede yeniden uygulanıyor.
+    """
+    if not req.zip_cached_id:
+        return
+    upload_dir = UPLOADS_ROOT / req.zip_cached_id
+    if not upload_dir.is_dir():
+        return
+    try:
+        yazilan = browse_mod.uygula(upload_dir, project_root)
+    except Exception as exc:  # noqa: BLE001  (derlemeyi bu yüzden düşürmeyiz)
+        job.log(f"Uyarı: arayüzdeki dosya düzenlemeleri uygulanamadı ({exc}).")
+        return
+    if not yazilan:
+        return
+    job.log(
+        f"Arayüzde düzenlediğiniz {len(yazilan)} dosya uygulandı:\n"
+        + "\n".join(f"  - {y}" for y in yazilan[:20])
+        + ("\n  …" if len(yazilan) > 20 else "")
+    )
 
 
 def _apply_fix_files(job: BuildJob, project_root: Path, req: "BuildRequest") -> bool:
@@ -2585,6 +2615,12 @@ def _execute_build(
     if req.fix_path is not None and not _apply_fix_files(job, project_root, req):
         return
 
+    # --- Arayüzden yapılan dosya düzenlemeleri ---------------------------
+    # "Dosyaları gözat" ekranında kaydedilenler. Düzeltme dosyalarından
+    # SONRA uygulanıyor: ikisi aynı dosyaya dokunuyorsa, kullanıcının
+    # arayüzde en son kaydettiği hâli geçerli olsun.
+    _apply_browser_edits(job, project_root, req)
+
     # --- Saf Python eklenti klasörleri -----------------------------------
     # Bazı oyunlar saf Python kütüphanelerini ayrı bir klasörde tutar, o
     # klasörü kendi elleriyle sys.path'e ekler ve düz `import X` ile çağırır.
@@ -3536,6 +3572,128 @@ async def api_uploads() -> JSONResponse:
             "persistent": DATA_IS_PERSISTENT,
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Proje içeriğini gezme / düzenleme
+# ---------------------------------------------------------------------------
+
+
+def _browse_dir(upload_id: str) -> Path:
+    """Yüklemenin klasörünü döner; yoksa anlaşılır hata verir."""
+    if UPLOADS.get(upload_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Önbellekte böyle bir proje yok; yeniden yükleyin.",
+        )
+    return UPLOADS_ROOT / upload_id
+
+
+@app.post("/api/browse/{upload_id}/scan")
+async def api_browse_scan(upload_id: str) -> JSONResponse:
+    """
+    ZIP'i (ve içindeki RPA arşivlerini) tarar.
+
+    Pahalı olan tek adım bu; sonucu diske yazdığı için sonraki istekler
+    anında dönüyor. Tarama sırasında dosya "kullanımda" işaretleniyor ki
+    yer açma sırasında ayağımızın altından çekilmesin.
+    """
+    upload_dir = _browse_dir(upload_id)
+    entry = UPLOADS.acquire(upload_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Proje önbellekte bulunamadı.")
+    try:
+        dizin = await asyncio.to_thread(
+            browse_mod.tara, UPLOADS.path_of(upload_id), upload_dir
+        )
+    except browse_mod.BrowseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        UPLOADS.release(upload_id)
+
+    return JSONResponse(_browse_payload(upload_dir, dizin))
+
+
+@app.get("/api/browse/{upload_id}")
+async def api_browse(upload_id: str) -> JSONResponse:
+    """Taranmış listeyi döner; henüz taranmadıysa bunu söyler."""
+    upload_dir = _browse_dir(upload_id)
+    dizin = browse_mod.indeks(upload_dir)
+    if dizin is None:
+        return JSONResponse({"scanned": False, "entries": []})
+    return JSONResponse(_browse_payload(upload_dir, dizin))
+
+
+def _browse_payload(upload_dir: Path, dizin) -> dict:
+    duzenli = {k["path"] for k in browse_mod.duzenlemeler(upload_dir)}
+    return {
+        "scanned": True,
+        "project_root": dizin.project_root,
+        "archives": dizin.archives,
+        "truncated": dizin.truncated,
+        "note": dizin.note,
+        "edits": browse_mod.duzenlemeler(upload_dir),
+        "entries": [
+            {
+                "path": e.path, "size": e.size, "kind": e.kind,
+                "source": e.source, "openable": e.openable,
+                "edited": e.path in duzenli,
+            }
+            for e in dizin.entries
+        ],
+    }
+
+
+@app.get("/api/browse/{upload_id}/file")
+async def api_browse_file(upload_id: str, path: str) -> JSONResponse:
+    upload_dir = _browse_dir(upload_id)
+    try:
+        return JSONResponse(browse_mod.ac(upload_dir, path))
+    except browse_mod.BrowseError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except rpycfile.RpycError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Derlenmiş betik okunamadı: {exc}",
+        ) from exc
+
+
+@app.put("/api/browse/{upload_id}/file")
+async def api_browse_save(upload_id: str, request: Request) -> JSONResponse:
+    upload_dir = _browse_dir(upload_id)
+    try:
+        govde = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="Geçersiz istek.") from exc
+
+    yol = str(govde.get("path") or "")
+    metin = govde.get("text")
+    if not yol or not isinstance(metin, str):
+        raise HTTPException(status_code=400, detail="Eksik alan: path/text.")
+
+    try:
+        kayit = browse_mod.kaydet(
+            upload_dir, yol, metin,
+            blok_index=int(govde.get("block_index", -1)),
+            blok_satir=int(govde.get("block_line", -1)),
+        )
+    except browse_mod.BrowseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except rpycfile.RpycError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Değişiklik derlenmiş betiğe yazılamadı: {exc}",
+        ) from exc
+
+    return JSONResponse({"edit": kayit, "edits": browse_mod.duzenlemeler(upload_dir)})
+
+
+@app.delete("/api/browse/{upload_id}/file")
+async def api_browse_revert(upload_id: str, path: str) -> JSONResponse:
+    upload_dir = _browse_dir(upload_id)
+    if not browse_mod.sil(upload_dir, path):
+        raise HTTPException(status_code=404, detail="Bu dosyanın düzenlemesi yok.")
+    return JSONResponse({"ok": True, "edits": browse_mod.duzenlemeler(upload_dir)})
 
 
 @app.delete("/api/uploads/{upload_id}")
