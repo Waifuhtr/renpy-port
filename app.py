@@ -589,6 +589,30 @@ def _extract_rpa_archives(job: BuildJob, project_root: Path) -> bool:
         "olarak): bazı oyunlar açılışta kendi arşivlerinin VARLIĞINI "
         "denetliyor ve dosyayı silmek o denetimi düşürüyordu."
     )
+
+    # `config.archives`'i Android'de elle dolduruyoruz.
+    #
+    # Ren'Py'nin kendi kaynağıyla ölçüldü: Android'de oyun dosyaları
+    # APK içinden okunuyor ve bu yol `config.archives`'i HİÇ
+    # doldurmuyor — arşivler gerçek ve dokunulmamış olsa bile. "Arşiv
+    # var mı" diye kendi kontrolünü yapan oyunlar (bir oyuncunun
+    # cihazında karşılaşıldı: "DDEK arşiv dosyaları /game klasöründe
+    # bulunamadı") bu yüzden Android'de HER ZAMAN yanlış pozitif
+    # üretiyor — arşivleri boşaltıp boşaltmadığımızın bir önemi yok.
+    stems = sorted({r.archive.stem for r in results})
+    try:
+        (game_dir / rpa_archive._CONFIG_ARCHIVES_DOSYASI).write_text(
+            rpa_archive.config_archives_yamasi(stems), encoding="utf-8"
+        )
+        job.log(
+            f"  Android için config.archives elle dolduruldu ({', '.join(stems)}): "
+            "bazı oyunların kendi 'arşiv var mı' denetimi, Ren'Py'nin "
+            "Android'de bunu hiç doldurmaması yüzünden yanlış pozitif "
+            "üretiyordu."
+        )
+    except OSError as exc:
+        job.log(f"Uyarı: config.archives yaması yazılamadı ({exc}).")
+
     return True
 
 

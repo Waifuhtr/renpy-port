@@ -355,6 +355,55 @@ def _write_placeholder(archive: Path) -> bool:
     return True
 
 
+_CONFIG_ARCHIVES_DOSYASI = "zzz_aerokey_archive_registry.rpy"
+
+
+def config_archives_yamasi(stems: list[str]) -> str:
+    """
+    Android'de `config.archives`'i ELLE dolduran bir başlangıç betiği
+    üretir.
+
+    NEDEN GEREKLİ — gerçek Ren'Py 8.5.3 kaynağıyla doğrulandı
+    -----------------------------------------------------------
+    `config.archives`, yalnızca `renpy.loader.index_archives()`
+    çalışırsa doluyor; o da yalnızca masaüstü dosya sistemi taraması
+    (`scandirfiles_from_filesystem`) `.rpa` dosyaları BULURSA
+    çağrılıyor (`renpy/loader.py`, `scandirfiles_from_archives`).
+
+    Android'de oyun dosyaları APK içinden `android.apk.APK` ile
+    okunuyor (`scandirfiles_from_apk`) ve bu yol `arc_files`'a HİÇ
+    dokunmuyor. `renpy/bootstrap.py`, Android'de yazılabilir bir
+    `game/` klasörü OLUŞTURUYOR ama içini doldurmuyor — dolayısıyla
+    masaüstü taraması da orada hiçbir arşiv bulamıyor.
+
+    Sonuç: Android'de `config.archives` muhtemelen HİÇ dolmuyor —
+    arşivler gerçek ve dokunulmamış olsa BİLE. Bazı oyunlar/modlar
+    açılışta `if not "audio" in config.archives: renpy.error(...)`
+    gibi bir "arşiv var mı" denetimi yapıyor; bu denetim Android'de
+    HER ZAMAN yanlış pozitif üretir.
+
+    Gerçek Ren'Py 8.5.3 ile ölçüldü: `config.archives` boşken bu
+    denetim çöküyor; `init -1000`'de arşiv adları elle eklenince
+    denetim sorunsuz geçiyor.
+
+    Bu betik `init -1000`'de (çoğu `init python:` bloğundan önce)
+    çalışıp `renpy.android` açıkken `config.archives`'i dolduruyor.
+    Masaüstünde (`renpy.android` kapalı) hiçbir şey yapmıyor — zaten
+    orada mekanizma doğru çalışıyor (ölçüldü).
+    """
+    liste = ", ".join(repr(s) for s in stems)
+    return (
+        "# Bu dosya AeroKey tarafından derleme sırasında otomatik "
+        "üretildi.\n"
+        "# Elle düzenlemeyin; bir sonraki derlemede üzerine yazılır.\n"
+        "init -1000 python:\n"
+        "    if renpy.android:\n"
+        f"        for _aerokey_arc in [{liste}]:\n"
+        "            if _aerokey_arc not in config.archives:\n"
+        "                config.archives.append(_aerokey_arc)\n"
+    )
+
+
 def find_archives(game_dir: Path) -> list[Path]:
     """
     `game/` altındaki tüm `.rpa` arşivlerini bulur.
