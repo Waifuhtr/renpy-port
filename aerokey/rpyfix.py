@@ -300,6 +300,11 @@ class RepairResult:
     # durumda derlemeyi ASLA durdurmuyoruz (bizim adımımız yüzünden
     # çalışabilecek bir derleme engellenmemeli).
     inconclusive: bool = False
+    # Ren'Py'nin `.bak`'a çevirip bizim geri aldığımız betikler. Dolu
+    # olması, `--keep-orphan-rpyc` bayrağının işe yaramadığı (ör. eski
+    # bir Ren'Py sürümü) ve güvenlik ağının devreye girdiği anlamına
+    # gelir — günlükte görünmesi gerekir.
+    orphan_restored: list[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -557,13 +562,92 @@ def find_renpy_binary(sdk_root: Path) -> Optional[Path]:
     return adaylar[0] if adaylar else None
 
 
+_ORPHAN_NOTU = """
+`compile` komutu, KAYNAĞI OLMAYAN .rpyc dosyalarını YOK EDER.
+
+Ren'Py 8.5.3 kaynağı (renpy/script.py):
+
+    if (renpy.game.args.command == "compile") and not (
+            renpy.game.args.keep_orphan_rpyc):
+        self.clean_script_files()
+
+ve clean_script_files():
+
+    if not os.path.isfile(dn + fn + ".rpy") and not os.path.isfile(
+            dn + fn + "_ren.py"):
+        os.rename(name, name + ".bak")
+
+Yani yanında `.rpy` kaynağı bulunmayan her `.rpyc`, `.rpyc.bak`
+adına çevriliyor. DDLC gibi DERLENMİŞ dağıtımlarda `.rpy` hiç YOKTUR:
+dolayısıyla söz dizimi denetimimiz oyunun TÜM betiklerini siliyordu.
+Sonuç, telefonda "could not find label 'start'" çökmesiydi ve çıkış
+kodu 0 olduğu için hiçbir yerde hata görünmüyordu.
+
+Gerçek Ren'Py 8.5.3 ikilisiyle ölçüldü:
+
+    compile                      -> script.rpyc  => script.rpyc.bak
+    compile --keep-orphan-rpyc   -> script.rpyc  korunuyor
+
+Bayrağı geçmenin yanında, KOŞULSUZ bir güvenlik ağı da var
+(`restore_orphan_backups`): bayrağı tanımayan eski bir Ren'Py sürümü
+kullanılsa bile dosyalar geri alınıyor.
+"""
+
+# `compile` çalıştırmadan önce/sonra karşılaştırdığımız betik uzantıları.
+_BETIK_UZANTILARI = (".rpyc", ".rpymc")
+
+
+def script_snapshot(project_root: Path) -> set[Path]:
+    """Projedeki derlenmiş betiklerin YOLLARINI kaydeder."""
+    game = Path(project_root) / "game"
+    if not game.is_dir():
+        return set()
+    bulunan: set[Path] = set()
+    for uzanti in _BETIK_UZANTILARI:
+        bulunan.update(game.rglob("*" + uzanti))
+    return bulunan
+
+
+def restore_orphan_backups(project_root: Path, onceki: set[Path]) -> list[str]:
+    """
+    Ren'Py'nin `.bak`'a çevirdiği betikleri geri alır.
+
+    YALNIZCA bizim çalıştırmamızdan ÖNCE var olan dosyalar geri
+    alınıyor. Oyunun kendi içinde gelen `.rpyc.bak` dosyaları (mod
+    yapımcıları taban oyunu böyle devre dışı bırakıyor) oldukları gibi
+    bırakılıyor — onlara dokunmak oyunu bozardı.
+
+    Döner: geri alınan dosyaların game/ içindeki göreli adları.
+    """
+    game = Path(project_root) / "game"
+    geri: list[str] = []
+    for yol in onceki:
+        if yol.exists():
+            continue
+        yedek = yol.with_name(yol.name + ".bak")
+        if not yedek.is_file():
+            continue
+        try:
+            yedek.replace(yol)
+        except OSError:
+            continue
+        try:
+            geri.append(str(yol.relative_to(game)))
+        except ValueError:
+            geri.append(yol.name)
+    geri.sort()
+    return geri
+
+
 def run_check(
     renpy_bin: Path,
     project_root: Path,
     timeout: int = 900,
+    keep_orphan_rpyc: bool = True,
+    restored_out: Optional[list[str]] = None,
 ) -> tuple[Optional[int], str, str]:
     """
-    `renpy <proje> compile` çalıştırır.
+    `renpy <proje> compile --keep-orphan-rpyc` çalıştırır.
 
     `compile` komutu (renpy/arguments.py -> compile) `False` döndürüyor,
     yani oyun BAŞLATILMIYOR: yalnızca script yükleniyor, init kodu
@@ -582,10 +666,26 @@ def run_check(
     # Mutlak yola çeviriyoruz: alt süreci projenin içinde çalıştırdığımız
     # için göreli bir yol orada aranır ve "dosya yok" hatası verirdi.
     cmd = [str(Path(renpy_bin).resolve()), str(Path(project_root).resolve()), "compile"]
+    if keep_orphan_rpyc:
+        # OYUNU YOK ETMEYİ ÖNLEYEN BAYRAK — ayrıntı için _ORPHAN_NOTU.
+        cmd.append("--keep-orphan-rpyc")
     env = dict(os.environ)
     env.pop("DISPLAY", None)
     env["SDL_VIDEODRIVER"] = "dummy"
     env["SDL_AUDIODRIVER"] = "dummy"
+
+    # KOŞULSUZ GÜVENLİK AĞI. Bayrağı geçiyoruz ama ona GÜVENMİYORUZ:
+    # bayrağı tanımayan eski bir Ren'Py sürümü seçilirse ya da ileride
+    # başka bir kod yolu aynı şeyi yaparsa, betikleri yine geri alıyoruz.
+    # Bu adımın atlanması oyunun TÜM script'ini yok ediyor ve çıkış kodu
+    # 0 olduğu için hiçbir yerde hata görünmüyor.
+    onceki_betikler = script_snapshot(project_root)
+
+    def _geri_yukle() -> None:
+        geri = restore_orphan_backups(project_root, onceki_betikler)
+        if geri and restored_out is not None:
+            restored_out.extend(geri)
+
     try:
         proc = subprocess.run(
             cmd,
@@ -597,6 +697,7 @@ def run_check(
             env=env,
         )
     except subprocess.TimeoutExpired as exc:
+        _geri_yukle()
         cikti = exc.output or b""
         if isinstance(cikti, str):
             cikti = cikti.encode("utf-8", "replace")
@@ -609,6 +710,7 @@ def run_check(
         # Yanlış mimarideki bir ikiliyi çalıştırmak ENOEXEC verir. Çağıran
         # taraf bunu görüp SIRADAKI adaya geçebilsin diye ayırt edilebilir
         # bir işaret koyuyoruz.
+        _geri_yukle()
         isaret = _ENOEXEC_MARK if getattr(exc, "errno", None) == errno.ENOEXEC else ""
         return (
             None,
@@ -617,6 +719,7 @@ def run_check(
             f"Komut: {' '.join(cmd)}",
         )
 
+    _geri_yukle()
     return proc.returncode, proc.stdout.decode("utf-8", "replace"), ""
 
 
@@ -1275,7 +1378,10 @@ def repair(
         # kendi makinesinden kalma eski bir `errors.txt` olabilir ve onu
         # okumak, var olmayan hataları bildirmek olurdu.
         _temizle(project_root)
-        code, output, detail = run_check(renpy_bin, project_root, timeout=timeout)
+        code, output, detail = run_check(
+            renpy_bin, project_root, timeout=timeout,
+            restored_out=res.orphan_restored,
+        )
 
         # İkili bu makinenin mimarisine uymuyorsa sıradaki adayı dene.
         # (renutil kurulumunda hem aarch64 hem x86_64 bulunabiliyor.)
@@ -1284,7 +1390,10 @@ def repair(
             if sonraki >= len(adaylar):
                 break
             renpy_bin = adaylar[sonraki]
-            code, output, detail = run_check(renpy_bin, project_root, timeout=timeout)
+            code, output, detail = run_check(
+                renpy_bin, project_root, timeout=timeout,
+                restored_out=res.orphan_restored,
+            )
 
         son_cikti = output
         res.failure_detail = detail

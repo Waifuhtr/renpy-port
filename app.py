@@ -901,6 +901,24 @@ def _syntax_preflight(
         )
         return True
 
+    # Güvenlik ağı devreye girdiyse bunu SÖYLEMEK gerekiyor: sessizce
+    # düzeltmek, aynı arızanın ileride fark edilmeden dönmesi demek.
+    if res.orphan_restored:
+        ornek = ", ".join(res.orphan_restored[:8])
+        devami = (
+            f" … ve {len(res.orphan_restored) - 8} dosya daha"
+            if len(res.orphan_restored) > 8 else ""
+        )
+        job.log(
+            f"  UYARI: Ren'Py, kaynağı (.rpy) bulunmayan "
+            f"{len(res.orphan_restored)} derlenmiş betiği '.bak' adına "
+            "çevirmişti; hepsi geri alındı.\n"
+            f"      geri alınanlar: {ornek}{devami}\n"
+            "      (Bu, derlenmiş dağıtımlarda oyunun TÜM script'ini yok "
+            "eden bir davranıştır; '--keep-orphan-rpyc' bayrağı bunu "
+            "engellemeliydi.)"
+        )
+
     if res.inconclusive:
         job.log(f"  {res.note}")
         return True
