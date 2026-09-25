@@ -3207,6 +3207,49 @@ if WEB_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
 
+# Arayüz dosyalarının SADECE web/ altından okunduğunu hatırlatan denetim.
+_WEB_DOSYALARI = ("index.html", "app.js", "style.css")
+
+
+def _basibos_web_dosyalari() -> list[str]:
+    """
+    Kök dizine düşmüş, sunucunun HİÇ okumadığı arayüz dosyalarını bulur.
+
+    Gerçekte yaşanan arıza: güncelleme ZIP'i klasör yapısı korunmadan
+    açılınca `web/index.html` Space'in köküne (`index.html`) düştü.
+    Sunucu ise her zaman `web/index.html` okuyor; dolayısıyla HTML eski
+    kaldı, `web/app.js` ise yenilendi. Yeni JS, eski HTML'de olmayan bir
+    alanı arayıp patladı ve "Derleme başlat" düğmesi hiçbir tepki
+    vermedi. Bu denetim, sebebi arayüzde açıkça söyleyebilmek için var.
+
+    Yalnızca İÇERİĞİ FARKLI olanlar bildiriliyor: aynı dosyanın kökte de
+    bir kopyasının durması zararsız, yanıltıcı olan FARKLI olmasıdır.
+    """
+    basibos: list[str] = []
+    for ad in _WEB_DOSYALARI:
+        kok = APP_DIR / ad
+        icerideki = WEB_DIR / ad
+        if not kok.is_file() or not icerideki.is_file():
+            continue
+        try:
+            if kok.read_bytes() != icerideki.read_bytes():
+                basibos.append(ad)
+        except OSError:
+            continue
+    return basibos
+
+
+_BASIBOS_WEB = _basibos_web_dosyalari()
+if _BASIBOS_WEB:
+    print(
+        "UYARI: Space kökünde, web/ içindekilerden FARKLI arayüz dosyaları "
+        f"var: {', '.join(_BASIBOS_WEB)}. Sunucu yalnızca web/ altını "
+        "okuduğu için bu dosyalar HİÇ kullanılmıyor. Güncelleme ZIP'ini "
+        "klasör yapısını koruyarak açın.",
+        flush=True,
+    )
+
+
 def _bool_form(value: Optional[str]) -> bool:
     return str(value).lower() in ("1", "true", "on", "yes")
 
@@ -3358,6 +3401,9 @@ async def api_config() -> JSONResponse:
             "persistent_storage": DATA_IS_PERSISTENT,
             "auto_keystore_exists": AUTO_KEYSTORE.is_file(),
             "keystore_from_secret": bool(os.environ.get(ENV_KEYSTORE_B64, "").strip()),
+            # Kökte kalmış, kullanılmayan arayüz dosyaları (varsa arayüz
+            # bunu ekranda açıkça söylüyor).
+            "stray_web_files": _basibos_web_dosyalari(),
         }
     )
 

@@ -831,3 +831,37 @@ code {
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 .toast.bad { border-color: rgba(251, 113, 133, 0.5); color: var(--bad); }
+
+/* --- Arayüz uyumsuzluk şeridi ---------------------------------------------
+   Space'e app.js ile index.html'in farklı sürümleri yüklendiğinde çıkar.
+   Bilerek kapatılabilir ama kendiliğinden KAYBOLMAZ: sessiz kalırsa
+   "düğmeye basıyorum hiçbir şey olmuyor" hatası geri döner. */
+.arayuz-uyarisi {
+  position: sticky;
+  top: 0;
+  z-index: 60;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 12px 18px;
+  background: rgba(251, 113, 133, 0.14);
+  border-bottom: 1px solid rgba(251, 113, 133, 0.5);
+  color: var(--bad);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.arayuz-uyarisi > span { flex: 1; }
+
+.arayuz-uyarisi-kapat {
+  flex: none;
+  background: none;
+  border: 0;
+  color: inherit;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.arayuz-uyarisi-kapat:hover { opacity: 1; }

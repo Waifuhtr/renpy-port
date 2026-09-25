@@ -6,7 +6,119 @@
 (() => {
   "use strict";
 
+  /**
+   * Arayüz sürümü: index.html içindeki `<body data-arayuz="...">` ile
+   * AYNI olmak ZORUNDA.
+   *
+   * NEDEN VAR: bu dosya ile index.html birlikte değişiyor. Space'e
+   * yalnızca biri yüklenirse (ör. ZIP klasör yapısı korunmadan açılıp
+   * index.html yanlış yere düşerse) JS, HTML'de olmayan bir alanı
+   * arıyor ve sessizce patlıyordu — dışarıdan "düğmeye basıyorum hiçbir
+   * şey olmuyor" gibi görünüyordu. Artık bu durum sayfanın en üstünde
+   * açıkça yazıyor.
+   */
+  const ARAYUZ_SURUMU = "31";
+
   const $ = (id) => document.getElementById(id);
+
+  /**
+   * Olmayan öğede patlamayan dosya okuyucu.
+   *
+   * `$("x").files[0]` ifadesi, öğe yoksa TypeError fırlatır ve o anki
+   * işleyicinin geri kalanı HİÇ çalışmaz. Bu yardımcı, eksik öğeyi
+   * "dosya seçilmemiş" olarak ele alır; eksikliği ayrıca yukarıdaki
+   * şerit zaten bildiriyor.
+   */
+  function secilenDosya(id) {
+    const el = $(id);
+    if (!el || !el.files) return null;
+    return el.files[0] || null;
+  }
+
+  /**
+   * Sayfanın en üstüne, KAPANMAYAN bir uyarı şeridi koyar.
+   *
+   * Bildirimler (toast) birkaç saniyede kayboluyor; arayüz/sunucu
+   * dosyaları uyumsuzsa bunun ekranda KALMASI gerekiyor.
+   */
+  function serit(metin) {
+    let el = document.getElementById("arayuz-uyarisi");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "arayuz-uyarisi";
+      el.className = "arayuz-uyarisi";
+      const kapat = document.createElement("button");
+      kapat.type = "button";
+      kapat.className = "arayuz-uyarisi-kapat";
+      kapat.textContent = "×";
+      kapat.addEventListener("click", () => el.remove());
+      el.appendChild(document.createElement("span"));
+      el.appendChild(kapat);
+      document.body.insertBefore(el, document.body.firstChild);
+    }
+    el.firstChild.textContent = metin;
+    return el;
+  }
+
+  // Şerit metnini seçmek için: arayüz dosyaları uyumsuz mu?
+  // Bilerek genel hata dinleyicilerinden ÖNCE tanımlanıyor.
+  let arayuzUyumsuz = false;
+
+  // Hiçbir JavaScript hatası artık sessiz kalmıyor. Bu dinleyiciler
+  // bilerek EN BAŞTA kuruluyor: aşağıdaki kurulum satırlarının kendisi
+  // patlasa bile (ör. HTML'de olmayan bir öğe aranırsa) kullanıcı
+  // ekranda ne olduğunu görüyor.
+  window.addEventListener("error", (e) => {
+    bildirBeklenmedik(e.error || e.message);
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    bildirBeklenmedik(e.reason);
+  });
+
+  /**
+   * HTML ile bu dosyanın uyumlu olup olmadığını denetler.
+   *
+   * Uyumsuzluk, gerçekte yaşanmış bir arızanın sebebiydi: Space'e yeni
+   * app.js yüklenmiş ama index.html eski kalmıştı; JS, HTML'de olmayan
+   * `#fixes` alanını okumaya çalışıp patlıyor ve "Derleme başlat"
+   * düğmesi hiçbir tepki vermiyordu. Artık sebep ekranda yazıyor.
+   */
+  function arayuzuDenetle() {
+    const zorunlu = [
+      "build-form", "build-btn", "console", "status-pill", "status-text",
+      "results", "results-list", "dropzone", "project_zip", "zip-name",
+      "cache-field", "cache-list", "cache-size", "upload-progress",
+      "upload-bar-fill", "upload-status", "upload-cancel",
+      "fixes", "icon", "banner", "translation", "keystore",
+      "renpy_version", "package_prefix", "manual_name", "manual_package",
+      "manual_version", "keystore_alias", "keystore_password",
+      "aerokey_base_url", "aerokey_key_page", "aerokey_game_id",
+      "translation_mode", "want_apk", "want_aab", "aerokey_enabled",
+      "aerokey_leaderboard", "aerokey_survey", "aerokey_profile",
+      "aerokey_bug_report", "aerokey_notifications", "masthead-meta",
+      "version-hint", "signing-callout", "keystore-info", "aerokey-body",
+      "refresh-game-id", "download-keystore", "show-keystore-info",
+      "copy-log", "clear-log",
+    ];
+    const eksik = zorunlu.filter((id) => !document.getElementById(id));
+    const htmlSurumu = (document.body && document.body.dataset.arayuz) || "";
+
+    if (!eksik.length && htmlSurumu === ARAYUZ_SURUMU) return true;
+
+    arayuzUyumsuz = true;
+    let metin =
+      "Space'teki arayüz dosyaları birbiriyle uyumsuz: app.js sürüm " +
+      ARAYUZ_SURUMU + ", index.html sürüm " + (htmlSurumu || "bilinmiyor") + ".";
+    if (eksik.length) {
+      metin += " HTML'de bulunamayan alanlar: " + eksik.join(", ") + ".";
+    }
+    metin +=
+      " Son paketteki web/ klasörünü (index.html, app.js, style.css)" +
+      " KLASÖR YAPISINI KORUYARAK Space'e yükleyin; aksi halde derleme" +
+      " düğmesi tepki vermeyebilir.";
+    serit(metin);
+    return false;
+  }
 
   const form = $("build-form");
   const buildBtn = $("build-btn");
@@ -220,15 +332,38 @@
       const res = await fetch("/api/config");
       const cfg = await res.json();
 
-      $("renpy_version").value = cfg.renpy_version;
-      $("renpy_version").placeholder = cfg.renpy_version;
-      $("version-hint").textContent = `İmaja gömülü sürüm: ${cfg.renpy_version} (en hızlısı)`;
+      // Eksik bir alan yapılandırmanın GERİ KALANINI engellemesin:
+      // asıl uyarı şeridi zaten eksikliği söylüyor.
+      const yaz = (id, alan, deger) => {
+        const el = $(id);
+        if (el) el[alan] = deger;
+      };
+      yaz("renpy_version", "value", cfg.renpy_version);
+      yaz("renpy_version", "placeholder", cfg.renpy_version);
+      yaz(
+        "version-hint", "textContent",
+        `İmaja gömülü sürüm: ${cfg.renpy_version} (en hızlısı)`
+      );
 
-      $("aerokey_base_url").value = cfg.aerokey_base_url;
-      $("aerokey_key_page").value = cfg.aerokey_key_page;
-      $("aerokey_game_id").placeholder = cfg.suggested_game_id;
+      yaz("aerokey_base_url", "value", cfg.aerokey_base_url);
+      yaz("aerokey_key_page", "value", cfg.aerokey_key_page);
+      yaz("aerokey_game_id", "placeholder", cfg.suggested_game_id);
+
+      // Kökte kalmış, sunucunun hiç okumadığı arayüz dosyaları varsa
+      // sebebi doğrudan söylüyoruz: en sık yapılan hata, güncelleme
+      // ZIP'ini klasör yapısını korumadan açmak.
+      const basibos = cfg.stray_web_files || [];
+      if (basibos.length) {
+        serit(
+          "Space'in kökünde, web/ içindekilerden FARKLI şu dosyalar var: " +
+          basibos.join(", ") + ". Sunucu yalnızca web/ klasörünü okuyor, " +
+          "bu kopyalar HİÇ kullanılmıyor. Güncelleme ZIP'ini klasör " +
+          "yapısını koruyarak açın (web/ klasörü web/ olarak kalsın)."
+        );
+      }
 
       const meta = $("masthead-meta");
+      if (!meta) return;
       meta.innerHTML = "";
       meta.appendChild(chip(`Ren'Py <b>${cfg.renpy_version}</b>`));
       meta.appendChild(chip(`Sonraki kimlik <b>${cfg.suggested_game_id}</b>`));
@@ -527,9 +662,15 @@
 
   // --- Derleme -----------------------------------------------------------
 
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-
+  /**
+   * Derlemeyi başlatır.
+   *
+   * Dışarıdaki `submit` dinleyicisi bunu try/catch içinde çağırıyor:
+   * beklenmedik bir JavaScript hatası olursa kullanıcı bunu GÖRÜYOR.
+   * Eskiden böyle bir hata sessizce yutuluyordu ve düğme çalışmıyormuş
+   * gibi görünüyordu.
+   */
+  async function derlemeyiBaslat() {
     if (activeUpload) {
       toast("Dosya hâlâ yükleniyor; bitmesini bekleyin.", true);
       return;
@@ -538,7 +679,9 @@
       toast("Önce bir Ren'Py proje ZIP dosyası seçin.", true);
       return;
     }
-    if (!$("want_apk").checked && !$("want_aab").checked) {
+    const apk = $("want_apk");
+    const aab = $("want_aab");
+    if (!(apk && apk.checked) && !(aab && aab.checked)) {
       toast("En az bir çıktı formatı seçin (APK ve/veya AAB).", true);
       return;
     }
@@ -547,11 +690,12 @@
     // Dosya YENİDEN YÜKLENMİYOR: sunucudaki önbellek kimliği gönderiliyor.
     data.append("cached_zip_id", selectedUploadId);
 
-    if ($("fixes").files[0]) data.append("fixes", $("fixes").files[0]);
-    if ($("icon").files[0]) data.append("icon", $("icon").files[0]);
-    if ($("banner").files[0]) data.append("banner", $("banner").files[0]);
-    if ($("translation").files[0]) data.append("translation", $("translation").files[0]);
-    if ($("keystore").files[0]) data.append("keystore", $("keystore").files[0]);
+    // Eksik bir alan yüzünden burada patlanmıyor: eksik alan "boş"
+    // sayılıyor, eksikliği de sayfanın üstündeki şerit bildiriyor.
+    ["fixes", "icon", "banner", "translation", "keystore"].forEach((id) => {
+      const dosya = secilenDosya(id);
+      if (dosya) data.append(id, dosya);
+    });
 
     const textFields = [
       "renpy_version", "package_prefix",
@@ -560,14 +704,20 @@
       "aerokey_base_url", "aerokey_key_page", "aerokey_game_id",
       "translation_mode",
     ];
-    textFields.forEach((id) => data.append(id, $(id).value));
+    textFields.forEach((id) => {
+      const el = $(id);
+      if (el) data.append(id, el.value);
+    });
 
     const boolFields = [
       "want_apk", "want_aab", "aerokey_enabled", "aerokey_leaderboard",
       "aerokey_survey", "aerokey_profile", "aerokey_bug_report",
       "aerokey_notifications",
     ];
-    boolFields.forEach((id) => data.append(id, $(id).checked ? "true" : "false"));
+    boolFields.forEach((id) => {
+      const el = $(id);
+      if (el) data.append(id, el.checked ? "true" : "false");
+    });
 
     setBusy(true);
     resetConsole();
@@ -588,7 +738,68 @@
       setStatus("error", "Başlatılamadı");
       setBusy(false);
     }
+  }
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    let sonuc;
+    try {
+      sonuc = derlemeyiBaslat();
+    } catch (err) {
+      bildirBeklenmedik(err);
+      return;
+    }
+    if (sonuc && typeof sonuc.catch === "function") sonuc.catch(bildirBeklenmedik);
   });
+
+  /**
+   * Beklenmedik bir hatayı SESSİZ bırakmaz.
+   *
+   * Bu fonksiyonun kendisi hata fırlatırsa genel `error` dinleyicisi
+   * onu tekrar buraya getirir; sonsuz döngüyü önlemek için her adım
+   * ayrı ayrı korunuyor ve yeniden girişe karşı bir bayrak var.
+   */
+  let hataBildiriliyor = false;
+
+  function bildirBeklenmedik(err) {
+    if (hataBildiriliyor) return;
+    hataBildiriliyor = true;
+    try {
+      const mesaj =
+        (err && (err.message || err.reason || String(err))) || "bilinmeyen hata";
+
+      try {
+        setBusy(false);
+      } catch (e2) {
+        /* düğme bulunamıyorsa şerit zaten bunu söylüyor */
+      }
+      try {
+        setStatus("error", "Arayüz hatası");
+        appendLine("Arayüz hatası: " + mesaj);
+      } catch (e2) {
+        /* günlük alanı yoksa yine şerit ve bildirim var */
+      }
+      try {
+        serit(
+          "Arayüzde beklenmedik bir hata oluştu: " + mesaj +
+          (arayuzUyumsuz
+            ? " — Sebebi büyük olasılıkla yukarıda belirtilen dosya" +
+              " uyumsuzluğu."
+            : " — Sorun sürerse sayfayı yenileyin; tekrarlıyorsa bu" +
+              " mesajı olduğu gibi bildirin.")
+        );
+      } catch (e2) {
+        /* şerit bile kurulamıyorsa yapılacak bir şey kalmadı */
+      }
+      try {
+        toast("Arayüz hatası: " + mesaj, true);
+      } catch (e2) {
+        /* yoksay */
+      }
+    } finally {
+      hataBildiriliyor = false;
+    }
+  }
 
   function listen(jobId, reconnected = false) {
     setStatus("running", "Derleniyor…");
@@ -742,6 +953,7 @@
     }
   });
 
+  arayuzuDenetle();
   selectedUploadId = recall(UPLOAD_KEY);
   loadConfig();
   loadUploads();
