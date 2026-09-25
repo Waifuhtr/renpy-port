@@ -541,6 +541,7 @@
     // Dosya YENİDEN YÜKLENMİYOR: sunucudaki önbellek kimliği gönderiliyor.
     data.append("cached_zip_id", selectedUploadId);
 
+    if ($("fixes").files[0]) data.append("fixes", $("fixes").files[0]);
     if ($("icon").files[0]) data.append("icon", $("icon").files[0]);
     if ($("banner").files[0]) data.append("banner", $("banner").files[0]);
     if ($("translation").files[0]) data.append("translation", $("translation").files[0]);
@@ -612,6 +613,11 @@
         toast("Derleme tamamlandı.");
       } else {
         setStatus("error", "Hata");
+        // Derleme durduysa bile indirilecek dosya olabilir: ön denetim,
+        // hata veren oyun dosyalarını buraya koyuyor.
+        if (payload.files && payload.files.length) {
+          showResults(payload.files, jobId, true);
+        }
         toast("Derleme başarısız oldu.", true);
       }
     });
@@ -675,8 +681,15 @@
     }
   }
 
-  function showResults(files, jobId) {
+  function showResults(files, jobId, hatali = false) {
     if (!files || !files.length) return;
+    const baslik = resultsBox.querySelector("h3");
+    if (baslik) {
+      baslik.textContent = hatali
+        ? "Hata veren dosyalar — indirip düzeltin"
+        : "Üretilen dosyalar";
+    }
+    resultsBox.classList.toggle("results-bad", hatali);
     resultsList.innerHTML = "";
     files.forEach((file) => {
       const item = document.createElement("div");

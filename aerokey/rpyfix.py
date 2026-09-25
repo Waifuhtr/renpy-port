@@ -68,13 +68,17 @@ kaynak satırıyla birlikte bildiriliyor.
 
 from __future__ import annotations
 
+import errno
 import os
+import platform
 import re
 import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+from . import py23
 
 # `:` isteğe bağlı olan ifadeler. Bunlarda hem `scene x` hem `scene x:`
 # + blok geçerlidir; boş blok varken `:` silmek anlamı değiştirmez.
@@ -157,6 +161,9 @@ _FRAME_RE = re.compile(r'^\s*File "(?P<file>[^"]+)", line (?P<line>\d+), in ')
 _EXC_RE = re.compile(
     r"^(?P<exc>[A-Za-z_][\w.]*(?:Error|Exception|Warning)?): ?(?P<msg>.*)$"
 )
+
+# Yanlış mimarideki ikili işareti (bkz. run_check / repair).
+_ENOEXEC_MARK = "[mimari-uyumsuz] "
 
 _ORTAM_KAPATMA = "AEROKEY_SYNTAX_FIX"
 # Init hatalarında derlemeyi durdurmayı kapatmak için kaçış kapısı.
@@ -275,6 +282,15 @@ class RepairResult:
     # script ayrıştırılıyor ama çalıştırılınca patlıyor. Derlemeyi yine de
     # düşürüyorlar; gerekçe `InitError` içinde.
     init_errors: list["InitError"] = field(default_factory=list)
+    # Init hatalarına uygulanan ve Ren'Py tarafından onaylanan düzeltmeler.
+    init_fixes: list[Fix] = field(default_factory=list)
+    # Denenip Ren'Py tarafından REDDEDİLEN adaylar (hata kaybolmadı).
+    init_reverted: list[Fix] = field(default_factory=list)
+    # Onaylanmış düzeltmeler, başka hata kaldığı için topluca geri
+    # alındıysa True. `init_fixes` yine dolu kalır: o düzeltmeler
+    # gerçekten işe yaradı, yalnızca yarım onarım bırakmamak için
+    # geri sarıldılar.
+    init_rolled_back: bool = False
     note: str = ""
     # Ön denetim çalıştırılamadıysa sebebin ayrıntısı (yol, istisna,
     # zaman aşımı süresi). Bir sonraki turda tahmin etmek zorunda
@@ -456,41 +472,89 @@ def parse_errors(text: str) -> list[ParseIssue]:
 # --------------------------------------------------------------------------
 
 
-def find_renpy_binary(sdk_root: Path) -> Optional[Path]:
+def host_platform() -> str:
     """
-    SDK içindeki yerel Ren'Py yorumlayıcısını bulur.
+    Bu makinenin Ren'Py platform adı (`linux-x86_64` gibi).
 
-    `renpy.sh`, `lib/py3-<platform>/renpy` ikilisini exec ediyor ve ikili
-    kendi konumundan SDK kökünü çıkarıyor; yani ikiliyi doğrudan çağırmak
-    kabuk betiğini çağırmakla aynı şey. `uname` farklarına takılmamak için
-    önce ikiliyi arıyoruz.
+    Mantık `renpy.sh` ile birebir aynı: `uname -s` + `uname -m`, sonra
+    bilinen takma adların eşlenmesi.
+    """
+    makine = (platform.machine() or "").lower()
+    sistem = (platform.system() or "").lower()
+
+    if sistem == "darwin":
+        return "mac-universal"
+
+    if makine in ("x86_64", "amd64"):
+        mimari = "x86_64"
+    elif makine in ("i386", "i486", "i586", "i686"):
+        mimari = "i686"
+    elif makine in ("aarch64", "arm64"):
+        mimari = "aarch64"
+    else:
+        mimari = makine or "x86_64"
+
+    return f"linux-{mimari}"
+
+
+def renpy_binaries(sdk_root: Path) -> list[Path]:
+    """
+    SDK'daki çalıştırılabilir Ren'Py adaylarını, EN UYGUNU ÖNDE olacak
+    şekilde sıralar.
+
+    NEDEN SIRALAMA ÖNEMLİ — gerçek bir hatadan öğrenildi: eskiden
+    `lib/py3-linux-*` kalıbı alfabetik taranıyordu ve renutil kurulumunda
+    hem `py3-linux-aarch64` hem `py3-linux-x86_64` bulunduğu için ARM
+    ikilisi seçiliyordu. x86-64 makinede sonuç:
+
+        OSError: [Errno 8] Exec format error: .../py3-linux-aarch64/renpy
+
+    Yani ön denetim, tamamen çalışabilir bir kurulumda sessizce devre dışı
+    kalıyordu. Artık önce BU MAKİNENİN platformu deneniyor.
     """
     if not sdk_root.is_dir():
-        return None
+        return []
 
+    tercih = host_platform()
     adaylar: list[Path] = []
     lib = sdk_root / "lib"
+
     if lib.is_dir():
+        # 1) Tam eşleşme (py3-linux-x86_64, sonra eski adlandırma).
+        for ad in (f"py3-{tercih}", tercih):
+            adaylar.append(lib / ad / "renpy")
+        # 2) Geri kalanlar: eşleşme bulunamazsa hiç denememektense
+        #    denemek daha iyi; yanlış mimariyi çalıştırmak yalnızca
+        #    anlaşılır bir hata verir ve bir sonraki adaya geçilir.
         for kalip in ("py3-linux-*", "linux-*"):
-            adaylar.extend(sorted(p / "renpy" for p in lib.glob(kalip)))
+            for p in sorted(lib.glob(kalip)):
+                adaylar.append(p / "renpy")
+
     adaylar.append(sdk_root / "renpy.sh")
 
+    sonuc: list[Path] = []
     for exe in adaylar:
-        if not exe.is_file():
+        if exe in sonuc or not exe.is_file():
             continue
-        if os.access(exe, os.X_OK):
-            return exe
-        # Dosya var ama çalıştırma izni yok. Bu, arşivden açılmış
-        # kurulumlarda olabiliyor ve tek başına ön denetimi sessizce
-        # devre dışı bırakırdı; izni verip devam ediyoruz.
-        try:
-            exe.chmod(exe.stat().st_mode | 0o111)
-        except OSError:
-            continue
-        if os.access(exe, os.X_OK):
-            return exe
+        if not os.access(exe, os.X_OK):
+            # Dosya var ama çalıştırma izni yok. Bu, arşivden açılmış
+            # kurulumlarda olabiliyor ve tek başına ön denetimi sessizce
+            # devre dışı bırakırdı; izni verip devam ediyoruz.
+            try:
+                exe.chmod(exe.stat().st_mode | 0o111)
+            except OSError:
+                continue
+            if not os.access(exe, os.X_OK):
+                continue
+        sonuc.append(exe)
 
-    return None
+    return sonuc
+
+
+def find_renpy_binary(sdk_root: Path) -> Optional[Path]:
+    """SDK içindeki, bu makineye en uygun Ren'Py yorumlayıcısı."""
+    adaylar = renpy_binaries(sdk_root)
+    return adaylar[0] if adaylar else None
 
 
 def run_check(
@@ -542,10 +606,14 @@ def run_check(
             f"{timeout} saniyede bitmedi (zaman aşımı). Komut: {' '.join(cmd)}",
         )
     except OSError as exc:
+        # Yanlış mimarideki bir ikiliyi çalıştırmak ENOEXEC verir. Çağıran
+        # taraf bunu görüp SIRADAKI adaya geçebilsin diye ayırt edilebilir
+        # bir işaret koyuyoruz.
+        isaret = _ENOEXEC_MARK if getattr(exc, "errno", None) == errno.ENOEXEC else ""
         return (
             None,
             "",
-            f"Ren'Py başlatılamadı ({type(exc).__name__}: {exc}). "
+            f"{isaret}Ren'Py başlatılamadı ({type(exc).__name__}: {exc}). "
             f"Komut: {' '.join(cmd)}",
         )
 
@@ -908,6 +976,32 @@ def apply_fixes(
     return fixes, yedek, denenen
 
 
+def source_context(
+    project_root: Path, issue_file: str, line: int, span: int = 6
+) -> list[str]:
+    """
+    Hatalı satırın çevresini döndürür ("  12 | kod" biçiminde).
+
+    784 MB'lık bir ZIP'in içindeki 29. satırı görmek için kullanıcının
+    dosyayı elle çıkarması gerekiyordu. Günlüğe koymak, hatayı doğrudan
+    konuşulabilir hale getiriyor.
+    """
+    path = _resolve(project_root, issue_file)
+    if path is None:
+        return []
+    lines = _read_lines(path)
+    if lines is None:
+        return []
+
+    bas = max(0, line - 1 - span)
+    son = min(len(lines), line + span)
+    cikti: list[str] = []
+    for i in range(bas, son):
+        isaret = ">>" if i == line - 1 else "  "
+        cikti.append(f"{isaret} {i + 1:5d} | {lines[i].rstrip()}")
+    return cikti
+
+
 def _drop_rpyc(path: Path) -> None:
     """
     Bir `.rpy` dosyasının yanındaki derlenmiş `.rpyc` kopyasını siler.
@@ -1017,6 +1111,111 @@ def _inventory(
 
 
 # --------------------------------------------------------------------------
+# Init hatalarını onarma denemesi
+# --------------------------------------------------------------------------
+
+
+def _try_init_repairs(
+    project_root: Path,
+    ilk_hatalar: list[InitError],
+    denetle_init,
+    sure_doldu,
+    yedek: dict[Path, bytes],
+    kayit,
+    max_rounds: int = 6,
+    max_attempts: int = 10,
+) -> tuple[list[Fix], list[Fix], list[InitError]]:
+    """
+    Init hatalarını, Ren'Py'yi hakem tutarak onarmayı dener.
+
+    Her tur: kalan ilk hatayı al, o satır için aday düzeltmeler üret,
+    adayları TEK TEK uygulayıp script'i yeniden çalıştır. Hata
+    kaybolduysa aday kalır; kaybolmadıysa satır geri alınır.
+
+    `max_attempts` toplam Ren'Py çalıştırma sayısını sınırlar: her deneme
+    büyük bir oyunda 5-15 saniye sürüyor ve sınırsız denemek, hızlı cevap
+    vermek için eklenen bu adımı yavaş bir işkenceye çevirirdi.
+
+    Döner: (kalıcı düzeltmeler, geri alınanlar, kalan hatalar).
+    """
+    fixes: list[Fix] = []
+    geri_alinan: list[Fix] = []
+    hatalar = list(ilk_hatalar)
+    denemeler = 0
+
+    for _tur in range(max_rounds):
+        if not hatalar or denemeler >= max_attempts or sure_doldu():
+            break
+
+        hata = hatalar[0]
+        path = _resolve(project_root, hata.file)
+        if path is None:
+            break
+
+        lines = _read_lines(path)
+        if lines is None or not (1 <= hata.line <= len(lines)):
+            break
+
+        idx = hata.line - 1
+        ozgun_satir = lines[idx]
+        adaylar = py23.candidates(ozgun_satir, hata.exception)
+        if not adaylar:
+            break
+
+        yedek.setdefault(path, "".join(lines).encode("utf-8", "surrogateescape"))
+
+        basarili: Optional[Fix] = None
+        for aday in adaylar:
+            if denemeler >= max_attempts or sure_doldu():
+                break
+            denemeler += 1
+
+            ending = _line_ending(ozgun_satir)
+            yeni_satir = aday.line.rstrip("\r\n") + ending
+            lines[idx] = yeni_satir
+            if not _write_lines(path, lines):
+                lines[idx] = ozgun_satir
+                break
+            _drop_rpyc(path)
+
+            kayit(f"    deneme {denemeler}: {aday.description}")
+            yeni_hatalar = denetle_init()
+
+            if hata.key not in {h.key for h in yeni_hatalar}:
+                basarili = Fix(
+                    file=hata.file,
+                    line=hata.line,
+                    rule=aday.description,
+                    before=ozgun_satir,
+                    after=yeni_satir,
+                )
+                hatalar = yeni_hatalar
+                break
+
+            # İşe yaramadı: satırı geri al ve bir sonraki adayı dene.
+            lines[idx] = ozgun_satir
+            _write_lines(path, lines)
+            _drop_rpyc(path)
+            geri_alinan.append(
+                Fix(
+                    file=hata.file,
+                    line=hata.line,
+                    rule=aday.description,
+                    before=ozgun_satir,
+                    after=yeni_satir,
+                )
+            )
+
+        if basarili is None:
+            break
+
+        fixes.append(basarili)
+        kayit(f"    onarıldı: {hata.file}:{hata.line} ({basarili.rule})")
+
+    return fixes, geri_alinan, hatalar
+
+
+# --------------------------------------------------------------------------
 # Ana döngü
 # --------------------------------------------------------------------------
 
@@ -1053,11 +1252,12 @@ def repair(
         res.inconclusive = True
         return res
 
-    renpy_bin = find_renpy_binary(sdk_root)
-    if renpy_bin is None:
+    adaylar = renpy_binaries(sdk_root)
+    if not adaylar:
         res.note = f"Ren'Py yorumlayıcısı bulunamadı ({sdk_root}); ön denetim atlandı."
         res.inconclusive = True
         return res
+    renpy_bin = adaylar[0]
 
     def kayit(mesaj: str) -> None:
         if logger is not None:
@@ -1070,15 +1270,24 @@ def repair(
     son_cikti = ""
 
     def denetle() -> tuple[Optional[int], list[ParseIssue]]:
-        nonlocal son_cikti
+        nonlocal son_cikti, renpy_bin
         # Her denetimden ÖNCE de temizliyoruz: kullanıcının paketinde
         # kendi makinesinden kalma eski bir `errors.txt` olabilir ve onu
         # okumak, var olmayan hataları bildirmek olurdu.
         _temizle(project_root)
         code, output, detail = run_check(renpy_bin, project_root, timeout=timeout)
+
+        # İkili bu makinenin mimarisine uymuyorsa sıradaki adayı dene.
+        # (renutil kurulumunda hem aarch64 hem x86_64 bulunabiliyor.)
+        while detail.startswith(_ENOEXEC_MARK) and renpy_bin in adaylar:
+            sonraki = adaylar.index(renpy_bin) + 1
+            if sonraki >= len(adaylar):
+                break
+            renpy_bin = adaylar[sonraki]
+            code, output, detail = run_check(renpy_bin, project_root, timeout=timeout)
+
         son_cikti = output
-        if detail:
-            res.failure_detail = detail
+        res.failure_detail = detail
         issues = _collect_issues(project_root, output)
         _temizle(project_root)
         res.seconds = time.monotonic() - baslangic
@@ -1091,7 +1300,40 @@ def repair(
         # Çalışmıyorsa derleme kesin başarısız olacak (gerekçe: InitError).
         init_hatalari = parse_init_errors(son_cikti)
         if init_hatalari and _init_denetimi_acik():
-            res.init_errors = init_hatalari
+            # Mekanik olarak düzeltilebilecek Python 2 -> 3 satırlarını
+            # dene. Hakem yine Ren'Py: her deneme yeniden çalıştırılıyor.
+            init_yedek: dict[Path, bytes] = {}
+
+            def denetle_init() -> list[InitError]:
+                denetle()
+                return parse_init_errors(son_cikti)
+
+            kayit(
+                f"  {len(init_hatalari)} başlangıç (init) hatası bulundu; "
+                "mekanik olarak düzeltilebilenler deneniyor…"
+            )
+            yeni_fixes, geri_alinan, kalan = _try_init_repairs(
+                project_root,
+                init_hatalari,
+                denetle_init,
+                lambda: (time.monotonic() - baslangic) > budget,
+                init_yedek,
+                kayit,
+            )
+            res.init_reverted = geri_alinan
+
+            if not kalan:
+                res.init_fixes = yeni_fixes
+                res.ok = True
+                return res
+
+            # Tamamen temizlenemedi: söz dizimi onarımındaki güvencenin
+            # aynısı geçerli — ya hepsi ya hiçbiri.
+            res.init_fixes = yeni_fixes
+            if init_yedek:
+                _geri_al(init_yedek)
+                res.init_rolled_back = bool(yeni_fixes)
+            res.init_errors = kalan
             return res
 
         if code == 0:

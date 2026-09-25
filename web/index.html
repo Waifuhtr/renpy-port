@@ -65,6 +65,19 @@
         <div class="cache-list" id="cache-list"></div>
       </div>
 
+      <label class="field">
+        <span class="label">Düzeltme dosyaları <small>isteğe bağlı</small></span>
+        <input type="file" id="fixes" name="fixes" accept=".zip,.rpy,.rpym,.py,.json,.txt">
+        <small class="hint">
+          Oyunun kendi kodundaki bir hatayı düzelttiyseniz, yalnızca
+          <b>değişen dosyaları</b> buraya koyun — küçük bir ZIP ya da tek bir
+          <code>.rpy</code>. Büyük projeyi yeniden yüklemeniz gerekmez;
+          dosyalar derleme kopyasının üzerine yazılır. ZIP'in içinde
+          <code>game/</code> klasörü varsa yollar proje kökünden,
+          yoksa doğrudan <code>game/</code> altından sayılır.
+        </small>
+      </label>
+
       <div class="grid-2">
         <label class="field">
           <span class="label">Ren'Py sürümü</span>

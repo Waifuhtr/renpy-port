@@ -740,6 +740,17 @@ button { font: inherit; cursor: pointer; }
   animation: rise 0.4s ease both;
 }
 
+/* Derleme durduğunda hata veren dosyalar da aynı kutuda sunuluyor. */
+.results.results-bad {
+  border-color: rgba(248, 113, 113, 0.34);
+  background: rgba(248, 113, 113, 0.07);
+}
+.results.results-bad h3 { color: var(--bad); }
+.results.results-bad .result-item a {
+  background: linear-gradient(100deg, var(--bad), var(--accent));
+  color: #fff;
+}
+
 .results h3 {
   margin: 0 0 12px;
   font-size: 13px;

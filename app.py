@@ -55,6 +55,7 @@ from aerokey import live2d  # noqa: E402
 from aerokey import rpyfix  # noqa: E402
 from aerokey import uploads as upload_cache  # noqa: E402
 from aerokey import legacy  # noqa: E402
+from aerokey import overlay  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
@@ -530,6 +531,55 @@ def _extract_rpa_archives(job: BuildJob, project_root: Path) -> bool:
     return True
 
 
+def _apply_fix_files(job: BuildJob, project_root: Path, req: "BuildRequest") -> bool:
+    """
+    Kullanıcının yüklediği düzeltme dosyalarını projeye uygular.
+
+    Oyunun kendi kodundaki bir hatayı düzeltmek çoğu zaman tek satır,
+    ama o satır yüzlerce megabaytlık bir arşivin içinde. Bu adım yalnızca
+    DEĞİŞEN dosyaları alıyor; büyük paketi yeniden yüklemek gerekmiyor.
+
+    Döner: derlemeye devam edilebilir mi.
+    """
+    job.log("\nDüzeltme dosyaları uygulanıyor…")
+    try:
+        res = overlay.apply(project_root, req.fix_path, req.fix_name)
+    except overlay.OverlayError as exc:
+        job.log(f"Hata: düzeltme paketi uygulanamadı.\n{exc}")
+        job.status = "error"
+        return False
+    except (OSError, zipfile.BadZipFile) as exc:
+        job.log(f"Hata: düzeltme paketi okunamadı: {exc}")
+        job.status = "error"
+        return False
+
+    if not res.written and not res.replaced:
+        job.log(
+            "Hata: düzeltme paketinden hiçbir dosya uygulanamadı. "
+            "ZIP boş olabilir ya da içindeki yollar geçersiz."
+        )
+        job.status = "error"
+        return False
+
+    for yol in res.replaced:
+        job.log(f"  - {yol} (var olan dosyanın üzerine yazıldı)")
+    for yol in res.written:
+        job.log(f"  - {yol} (yeni dosya)")
+    if res.skipped:
+        job.log(f"  {len(res.skipped)} girdi güvensiz ad nedeniyle atlandı.")
+    if res.dropped_rpyc:
+        job.log(
+            f"  {res.dropped_rpyc} adet eski .rpyc silindi (yoksa Ren'Py "
+            "düzeltmenizi değil, eski derlenmiş kopyayı okurdu)."
+        )
+    job.log(
+        f"  Toplam {len(res.written) + len(res.replaced)} dosya, "
+        f"{res.total_bytes / 1024:.0f} KB. Orijinal proje paketiniz "
+        "değişmedi; bu yalnızca derleme kopyasında geçerli."
+    )
+    return True
+
+
 def _sdk_for_version(roots: list[Path], version: str) -> Optional[Path]:
     """
     İstenen Ren'Py sürümünün SDK klasörünü seçer.
@@ -580,7 +630,43 @@ _PY2_SIGNATURES = (
 )
 
 
-def _report_init_errors(job: BuildJob, project_root: Path, res) -> bool:
+def _offer_files(
+    job: BuildJob, out_dir: Optional[Path], project_root: Path, yollar: list[str]
+) -> list[str]:
+    """
+    Hata veren dosyaları indirilebilir hale getirir.
+
+    Kullanıcının elindeki proje 784 MB'lık bir ZIP; tek bir satırı görmek
+    için onu açması gerekiyordu. Derleme durduğunda, suçlanan dosyaları
+    doğrudan indirme listesine koyuyoruz: indir, düzelt, "Düzeltme
+    dosyaları" alanından geri yükle.
+    """
+    if out_dir is None:
+        return []
+
+    hedef_kok = out_dir / "hatali-dosyalar"
+    verilen: list[str] = []
+    for yol in dict.fromkeys(yollar):
+        kaynak = project_root / yol
+        try:
+            if not kaynak.is_file():
+                continue
+            # Ad çakışmasın diye klasör yapısı düzleştiriliyor.
+            hedef = hedef_kok / yol.replace("/", "__")
+            hedef.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(kaynak, hedef)
+        except OSError:
+            continue
+        with job.lock:
+            job.files.append(hedef)
+        verilen.append(yol)
+
+    return verilen
+
+
+def _report_init_errors(
+    job: BuildJob, project_root: Path, res, out_dir: Optional[Path] = None
+) -> bool:
     """
     Oyunun init kodundaki istisnaları bildirir ve derlemeyi durdurur.
 
@@ -591,11 +677,35 @@ def _report_init_errors(job: BuildJob, project_root: Path, res) -> bool:
     reddediyor. Yani bu hatalarla derlemeye devam etmek, kullanıcıyı 10+
     dakika bekletip aynı yere varmak demek.
     """
-    satirlar = "\n".join(f"  - {h.human()}" for h in res.init_errors[:15])
-    if len(res.init_errors) > 15:
-        satirlar += f"\n  … ve {len(res.init_errors) - 15} tane daha."
+    parcalar: list[str] = []
+    for hata in res.init_errors[:10]:
+        parcalar.append(f"  - {hata.human()}")
+        # Hatanın çevresini de gösteriyoruz: kullanıcının 784 MB'lık bir
+        # arşivi açıp o satırı bulması gerekmesin.
+        baglam = rpyfix.source_context(project_root, hata.file, hata.line)
+        if baglam:
+            parcalar.append("    ── dosyadan ──")
+            parcalar.extend(f"    {s}" for s in baglam)
+    satirlar = "\n".join(parcalar)
+    if len(res.init_errors) > 10:
+        satirlar += f"\n  … ve {len(res.init_errors) - 10} tane daha."
 
     ek = ""
+    if res.init_rolled_back and res.init_fixes:
+        ek += (
+            f"\n\n{len(res.init_fixes)} hatayı otomatik düzeltebildim ve "
+            "Ren'Py de onayladı, ama yukarıdaki hata(lar) elde kaldığı için "
+            "derleme yine duracaktı; yarım bir onarım bırakmamak adına "
+            "hepsini geri aldım. Düzeltebildiklerim:\n"
+            + "\n".join(f"  · {f.file}:{f.line} — {f.rule}" for f in res.init_fixes[:8])
+            + "\nSiz kalan hatayı düzeltirseniz bunlar kendiliğinden hallolur."
+        )
+    if res.init_reverted:
+        ek += (
+            f"\n\nAyrıca {len(res.init_reverted)} aday denendi ama Ren'Py "
+            "onaylamadı (satırlar geri alındı):\n"
+            + "\n".join(f"  · {f.rule}" for f in res.init_reverted[:6])
+        )
 
     # Eski Ren'Py sürümüyle yazılmış oyun + Python 3 hatası: bu ikisi bir
     # aradaysa sebep neredeyse kesin olarak sürüm uyuşmazlığıdır.
@@ -632,6 +742,17 @@ def _report_init_errors(job: BuildJob, project_root: Path, res) -> bool:
             "Yukarıdaki hata bununla ilgili olabilir."
         )
 
+    verilen = _offer_files(
+        job, out_dir, project_root, [h.file for h in res.init_errors]
+    )
+    if verilen:
+        ek += (
+            "\n\nHatalı dosyaları aşağıdaki indirme listesine koydum "
+            f"({len(verilen)} dosya). İndirip düzeltin, sonra arayüzdeki "
+            "'Düzeltme dosyaları' alanından yükleyin — 784 MB'lık projeyi "
+            "yeniden yüklemenize gerek yok."
+        )
+
     job.log(
         "\nDerleme BAŞLATILMADI: oyunun BAŞLANGIÇ (init) kodu hata veriyor.\n"
         f"Toplam {len(res.init_errors)} hata "
@@ -654,7 +775,10 @@ def _report_init_errors(job: BuildJob, project_root: Path, res) -> bool:
 
 
 def _syntax_preflight(
-    job: BuildJob, project_root: Path, sdk_root: Optional[Path]
+    job: BuildJob,
+    project_root: Path,
+    sdk_root: Optional[Path],
+    out_dir: Optional[Path] = None,
 ) -> bool:
     """
     Söz dizimi ön denetimi + basit hataların otomatik onarımı.
@@ -694,7 +818,20 @@ def _syntax_preflight(
         return True
 
     if res.init_errors:
-        return _report_init_errors(job, project_root, res)
+        return _report_init_errors(job, project_root, res, out_dir)
+
+    if res.init_fixes and not res.init_rolled_back:
+        satirlar = "\n".join(f"  - {f.human()}" for f in res.init_fixes)
+        job.log(
+            f"  {len(res.init_fixes)} başlangıç (init) hatası otomatik "
+            f"düzeltildi ({res.seconds:.0f} sn):\n"
+            f"{satirlar}\n"
+            "  Her düzeltmeyi uyguladıktan sonra script'i Ren'Py'ye "
+            "yeniden çalıştırdım; hepsini Ren'Py onayladı. Bu değişiklikler "
+            "yalnızca derleme kopyasında; kendi dosyalarınız DEĞİŞMEDİ."
+        )
+        if res.ok:
+            return True
 
     if res.ok and not res.fixes:
         job.log(
@@ -756,6 +893,14 @@ def _syntax_preflight(
         )
     if res.note:
         ek += f"\n{res.note}"
+
+    verilen = _offer_files(job, out_dir, project_root, sorted(gruplar))
+    if verilen:
+        ek += (
+            f"\n\nHatalı dosyaları indirme listesine koydum ({len(verilen)} "
+            "dosya). İndirip düzeltin, sonra 'Düzeltme dosyaları' alanından "
+            "yükleyin — büyük projeyi yeniden yüklemeniz gerekmez."
+        )
 
     dosya_sayisi = len(gruplar)
     job.log(
@@ -2043,6 +2188,9 @@ class BuildRequest:
     banner_path: Optional[Path]
     translation_path: Optional[Path]
     keystore_path: Optional[Path]
+    # Kullanicinin hazirladigi duzeltme paketi (ZIP ya da tek dosya).
+    fix_path: Optional[Path]
+    fix_name: str
     renpy_version: str
     want_apk: bool
     want_aab: bool
@@ -2178,7 +2326,7 @@ def run_build(job: BuildJob, req: BuildRequest) -> None:
 
         gecici = [
             req.icon_path, req.banner_path,
-            req.translation_path, req.keystore_path,
+            req.translation_path, req.keystore_path, req.fix_path,
         ]
         if req.zip_cached_id:
             # Proje ZIP'i önbellekte: SİLMİYORUZ. Kullanıcı aynı oyunu
@@ -2280,6 +2428,12 @@ def _execute_build(
     # Kimlik çözümlemesinden ÖNCE açıyoruz: options.rpy arşivin içindeyse
     # açtıktan sonra okunabilir hale gelir.
     if not _extract_rpa_archives(job, project_root):
+        return
+
+    # --- Düzeltme dosyaları ----------------------------------------------
+    # RPA açıldıktan SONRA uygulanıyor: kullanıcının düzeltmesi, arşivden
+    # çıkan aynı adlı dosyanın üzerine yazılsın istiyoruz.
+    if req.fix_path is not None and not _apply_fix_files(job, project_root, req):
         return
 
     # --- Saf Python eklenti klasörleri -----------------------------------
@@ -2612,7 +2766,7 @@ def _execute_build(
     # çalıştırılamaz. Derleme adımlarından ÖNCE: söz dizimi hatası olan bir
     # projede geri kalan her şey boşuna zaman kaybı.
     if not _syntax_preflight(
-        job, project_root, _sdk_for_version(_sdk_list, req.renpy_version)
+        job, project_root, _sdk_for_version(_sdk_list, req.renpy_version), out_dir
     ):
         return
 
@@ -3197,6 +3351,7 @@ async def api_build(
     banner: Optional[UploadFile] = File(None),
     translation: Optional[UploadFile] = File(None),
     keystore: Optional[UploadFile] = File(None),
+    fixes: Optional[UploadFile] = File(None),
     cached_zip_id: str = Form(""),
     renpy_version: str = Form(DEFAULT_RENPY_VERSION),
     want_apk: str = Form("true"),
@@ -3265,6 +3420,7 @@ async def api_build(
         banner_path = await _save_upload(banner, ".gif")
         translation_path = await _save_upload(translation, ".zip")
         keystore_path = await _save_upload(keystore, ".keystore")
+        fix_path = await _save_upload(fixes, ".fix")
     except BaseException:
         UPLOADS.release(entry.id)
         raise
@@ -3276,6 +3432,8 @@ async def api_build(
         banner_path=banner_path,
         translation_path=translation_path,
         keystore_path=keystore_path,
+        fix_path=fix_path,
+        fix_name=(fixes.filename if fixes is not None else "") or "",
         renpy_version=version,
         want_apk=apk,
         want_aab=aab,
