@@ -1323,6 +1323,176 @@ def patch_launcher_dump(sdk: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 4c-2) Launcher: Android paketine SECILEN dosyalari gorunur kilma
+# ---------------------------------------------------------------------------
+#
+# Bir kullanicinin 744 MB'lik bir ZIP'ten 55 MB'lik bir APK ciktigini
+# bildirmesi uzerine eklendi. Kok neden ARASTIRILDI ve su noktaya kadar
+# daraltildi: `launcher/game/distribute.rpy` -> `Distributor`, Android
+# paketine hangi dosyalarin girecegine OYUNUN KENDI `build.classify()`
+# kurallarina gore karar veriyor (`renpy/common/00build.rpy`). Bu adim
+# TAMAMEN SESSIZ: ne bizim gunlugumuzde, ne de Ren'Py'nin kendi ciktisinda
+# hangi dosyalarin elendigine dair TEK BIR SATIR yok.
+#
+# `rapt.build.build()`'in KENDISI (gercek RAPT 8.5.3 kaynagiyla, 647 MB'lik
+# sentetik bir proje ile olculdu) hicbir veri kaybetmiyor -- bu yuzden kayip,
+# RAPT'a ulasmadan ONCE, `Distributor` asamasinda oluyor olmali.
+#
+# Bu yama, `Distributor` bitirdigi anda (RAPT hic calismadan once) paketin
+# STAGING klasorunu tartip raporluyor. Boylece "kac dosya, kac MB paketlendi"
+# bilgisi artik gunlukte oluyor; kayip varsa BURADA gorunur, tahmin etmeye
+# gerek kalmaz.
+
+_DIST_ANCHOR = (
+    "        distribute.Distributor(p,\n"
+    "            reporter=reporter,\n"
+    "            packages=packages,\n"
+    "            build_update=False,\n"
+    "            noarchive=True,\n"
+    "            packagedest=dist,\n"
+    "            report_success=False,\n"
+    "            )\n"
+)
+
+_DIST_PATCH_VERSION = 1
+_DIST_BEGIN = "        # --- AEROKEY-DIST BEGIN (surum "
+
+_DIST_BLOCK_RE = re.compile(
+    r"[ \t]*# --- AEROKEY-DIST BEGIN.*?# --- AEROKEY-DIST END[^\n]*\n",
+    re.DOTALL,
+)
+
+_DIST_PATCH = _stamp_version([
+    _DIST_ANCHOR.rstrip("\n"),
+    '        # --- AEROKEY-DIST BEGIN (surum #) ----------------------------',
+    "        # Bu blok Ren'Py Android Paketleyici tarafindan uretildi.",
+    '        # BEGIN/END arasi her yamada tamamen yenilenir.',
+    '        #',
+    "        # Distributor, ANDROID paketine hangi dosyalarin girecegine",
+    '        # OYUNUN KENDI build.classify() kurallarina gore karar veriyor',
+    '        # ve bu tamamen sessiz. "APK beklenenden kucuk" turu bir',
+    '        # sorunda dosyalarin nerede kayboldugunu ayirt etmek',
+    '        # imkansizdi. Burada, RAPT hic calismadan once, paketlenen',
+    '        # STAGING klasorunu tartip bildiriyoruz.',
+    '        _aerokey_dist_boyut = 0',
+    '        _aerokey_dist_sayi = 0',
+    '        _aerokey_dist_uzantilar = {}',
+    '        for _aerokey_kok, _aerokey_dirs, _aerokey_dosyalar in os.walk(dist):',
+    '            for _aerokey_fn in _aerokey_dosyalar:',
+    '                _aerokey_yol = os.path.join(_aerokey_kok, _aerokey_fn)',
+    '                try:',
+    '                    _aerokey_boyut = os.path.getsize(_aerokey_yol)',
+    '                except OSError:',
+    '                    continue',
+    '                _aerokey_dist_boyut += _aerokey_boyut',
+    '                _aerokey_dist_sayi += 1',
+    '                _aerokey_uz = (os.path.splitext(_aerokey_fn)[1].lower()',
+    '                               or "(uzantisiz)")',
+    '                _aerokey_dist_uzantilar[_aerokey_uz] = (',
+    '                    _aerokey_dist_uzantilar.get(_aerokey_uz, 0) + 1)',
+    '',
+    '        _aerokey_proje_boyut = 0',
+    '        _aerokey_proje_sayi = 0',
+    '        _aerokey_oyun_dizini = os.path.join(p.path, "game")',
+    '        if os.path.isdir(_aerokey_oyun_dizini):',
+    '            for _aerokey_kok, _aerokey_dirs, _aerokey_dosyalar in os.walk(',
+    '                    _aerokey_oyun_dizini):',
+    '                for _aerokey_fn in _aerokey_dosyalar:',
+    '                    try:',
+    '                        _aerokey_proje_boyut += os.path.getsize(',
+    '                            os.path.join(_aerokey_kok, _aerokey_fn))',
+    '                        _aerokey_proje_sayi += 1',
+    '                    except OSError:',
+    '                        pass',
+    '',
+    '        print(',
+    '            "[aerokey] paket icin secilen dosyalar: %d dosya, %.1f MB "',
+    '            "(oyunun game/ klasoru: %d dosya, %.1f MB)" % (',
+    '                _aerokey_dist_sayi,',
+    '                _aerokey_dist_boyut / (1024.0 * 1024.0),',
+    '                _aerokey_proje_sayi,',
+    '                _aerokey_proje_boyut / (1024.0 * 1024.0),',
+    '            )',
+    '        )',
+    '        _aerokey_uzanti_sirali = sorted(',
+    '            _aerokey_dist_uzantilar.items(), key=lambda kv: -kv[1])[:14]',
+    '        print(',
+    '            "[aerokey] paketlenen uzanti dagilimi: " + ", ".join(',
+    '                "%s: %d" % (k, v) for k, v in _aerokey_uzanti_sirali',
+    '            )',
+    '        )',
+    '        if (_aerokey_proje_boyut > 0 and',
+    '                _aerokey_dist_boyut < _aerokey_proje_boyut * 0.5):',
+    '            print(',
+    '                "[aerokey] UYARI: paketlenen boyut, oyunun game/ "',
+    '                "klasorunden BELIRGIN kucuk (%.0f%%). build.classify() "',
+    '                "kurallari bazi dosyalari Android paketinin disinda "',
+    '                "birakiyor olabilir." % (',
+    '                    100.0 * _aerokey_dist_boyut',
+    '                    / max(_aerokey_proje_boyut, 1)',
+    '                )',
+    '            )',
+    '        # --- AEROKEY-DIST END ----------------------------------------',
+], _DIST_PATCH_VERSION)
+
+
+def patch_launcher_dist_diagnostics(sdk: Path) -> bool:
+    """
+    Launcher'a, Android paketine SECILEN dosyalarin dokumunu ekler.
+
+    Gerekce enjekte edilen blogun kendi yorumlarinda. Ayrinti icin bu
+    bolumun basindaki modul-seviyesi aciklamaya bakin.
+
+    Doner: dosya bu cagrida degistirildi mi.
+    """
+    launcher_dir = sdk / "launcher" / "game"
+    target = launcher_dir / "android.rpy"
+
+    if not target.is_file():
+        if not launcher_dir.is_dir():
+            return False
+        raise PatchError(
+            "Launcher dosyasi bulunamadi: " + str(target)
+        )
+
+    text = read(target)
+
+    current_tag = _DIST_BEGIN + str(_DIST_PATCH_VERSION) + ")"
+    if current_tag in text:
+        print("[aerokey] Dagitim yamasi zaten guncel (surum "
+              + str(_DIST_PATCH_VERSION) + "): " + str(target))
+        return False
+
+    text, removed = _DIST_BLOCK_RE.subn("", text)
+
+    if _DIST_ANCHOR not in text:
+        raise PatchError(
+            str(target)
+            + " icinde beklenen Distributor(...) cagrisi bulunamadi."
+            + " Ren'Py Launcher'in yapisi degismis olabilir; yama"
+            + " korlemesine uygulanmadi."
+        )
+
+    text = text.replace(_DIST_ANCHOR, _DIST_PATCH, 1)
+    write(target, text)
+
+    stale = target.with_suffix(".rpyc")
+    try:
+        stale.unlink()
+    except OSError:
+        pass
+
+    if removed:
+        print("[aerokey] Dagitim yamasi surum "
+              + str(_DIST_PATCH_VERSION) + " olarak yenilendi: " + str(target))
+    else:
+        print("[aerokey] Dagitim yamasi uygulandi (surum "
+              + str(_DIST_PATCH_VERSION) + "): " + str(target))
+
+    return True
+
+
+# ---------------------------------------------------------------------------
 # 4d) RAPT paketleme adimi: bellek tavani, ikon izolasyonu, adim gunlugu
 # ---------------------------------------------------------------------------
 
@@ -1826,6 +1996,7 @@ def apply_all(sdk: Path, skip_gradle_warm: bool = False) -> None:
     patch_manifest_template(sdk)
     patch_launcher_headless(sdk)
     patch_launcher_dump(sdk)
+    patch_launcher_dist_diagnostics(sdk)
     patch_rapt_build(sdk)
 
     # Varsayılan (devre dışı) yapılandırmayı yaz ki, paketleyici herhangi bir
