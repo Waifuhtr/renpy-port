@@ -373,9 +373,15 @@
 
     const items = data.uploads || [];
     cacheField.hidden = items.length === 0;
-    cacheSize.textContent = items.length
-      ? `· ${items.length} dosya, ${humanSize(data.total_bytes)}`
-      : "";
+    if (items.length) {
+      const omur = data.persistent
+        ? "kalıcı disk, Space yeniden başlasa da kalır"
+        : "geçici, Space yeniden başlarsa silinir";
+      cacheSize.textContent =
+        `· ${items.length} dosya, ${humanSize(data.total_bytes)} · ${omur}`;
+    } else {
+      cacheSize.textContent = "";
+    }
 
     // Seçili girdi artık yoksa (Space yeniden başlamış olabilir) seçimi bırak.
     if (selectedUploadId && !items.some((u) => u.id === selectedUploadId)) {

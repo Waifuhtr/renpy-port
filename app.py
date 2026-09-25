@@ -69,13 +69,8 @@ WORK_ROOT = Path(tempfile.gettempdir()) / "renpy_android_jobs"
 # Üretilen APK/AAB dosyaları buraya kopyalanır ve kullanıcıya sunulana kadar
 # SİLİNMEZ (yalnızca eskiyince, aşağıdaki temizlik ile silinir).
 RESULTS_ROOT = Path(tempfile.gettempdir()) / "renpy_android_results"
-# Yüklenen proje ZIP'leri burada, Space kapanana kadar duruyor. Böylece
-# aynı oyunu ikinci kez derlerken dosyayı yeniden yüklemek gerekmiyor.
-# BİLEREK ayrı bir kök: WORK_ROOT'taki 6 saatlik temizlik buraya uğramıyor.
-UPLOADS_ROOT = Path(tempfile.gettempdir()) / "renpy_android_uploads"
 WORK_ROOT.mkdir(parents=True, exist_ok=True)
 RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
-UPLOADS_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def _resolve_data_dir() -> tuple[Path, bool]:
@@ -121,6 +116,25 @@ def _resolve_data_dir() -> tuple[Path, bool]:
 
 
 DATA_DIR, DATA_IS_PERSISTENT = _resolve_data_dir()
+
+# Yüklenen proje ZIP'leri burada duruyor. Böylece aynı oyunu ikinci kez
+# derlerken dosyayı yeniden yüklemek gerekmiyor.
+#
+# Kalıcı disk (Storage Buckets) AÇIKSA orada tutuyoruz: Space yeniden
+# başlasa (yeniden dağıtım, uyku sonrası uyanma) bile dosya KAYBOLMUYOR —
+# kullanıcı büyük bir projeyi (yüzlerce MB) her test turunda yeniden
+# yüklemek zorunda kalmıyor. Kalıcı disk yoksa eskisi gibi /tmp'e düşüyoruz
+# (yalnızca konteynerin ömrü kadar yaşar, ama bu da hâlâ derlemeler arası
+# yeniden yüklemeyi önlüyor).
+#
+# WORK_ROOT'un altına DEĞİL: oradaki 6 saatlik otomatik temizlik ("iş
+# klasörleri") buraya uğramamalı — yükleme önbelleğinin ömrü kendi LRU
+# mantığıyla (aerokey/uploads.py) yönetiliyor.
+UPLOADS_ROOT = (
+    (DATA_DIR / "uploads") if DATA_IS_PERSISTENT
+    else Path(tempfile.gettempdir()) / "renpy_android_uploads"
+)
+UPLOADS_ROOT.mkdir(parents=True, exist_ok=True)
 
 # --- Sanal ekran -------------------------------------------------------
 # Modül seviyesinde çağırıyoruz ki hem `python3 app.py` hem de
@@ -2426,11 +2440,16 @@ def _execute_build(
 ) -> None:
     kaynak = UPLOADS.get(req.zip_cached_id) if req.zip_cached_id else None
     if kaynak is not None:
+        omur = (
+            "kalıcı diskte duruyor; Space yeniden başlasa bile KAYBOLMAZ"
+            if DATA_IS_PERSISTENT else
+            "Space kapanana kadar önbellekte kalacak (kalıcı disk kapalı; "
+            "yeniden başlarsa bir daha yüklemeniz gerekir)"
+        )
         job.log(
             f"Proje ZIP dosyası açılıyor… (önbellekten: {kaynak.name}, "
             f"{kaynak.size / (1024 * 1024):.1f} MB, {kaynak.uses}. kullanım)\n"
-            "Bu dosya Space kapanana kadar önbellekte kalacak; bir sonraki "
-            "derlemede yeniden yüklemeniz gerekmeyecek."
+            f"Bu dosya {omur}."
         )
     else:
         job.log("Proje ZIP dosyası açılıyor…")
@@ -3275,6 +3294,7 @@ async def api_uploads() -> JSONResponse:
             "uploads": [e.public() for e in entries],
             "total_bytes": sum(e.size for e in entries),
             "free_bytes": UPLOADS.free_bytes(),
+            "persistent": DATA_IS_PERSISTENT,
         }
     )
 
