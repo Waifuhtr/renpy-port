@@ -77,6 +77,13 @@ class CachedUpload:
     # Şu anda kaç derleme bu dosyayı kullanıyor. Sıfırdan büyükse
     # yer açmak için bile SİLİNMEZ.
     active: int = field(default=0, compare=False)
+    # Yükleme bittiğinde meta.json'a yazılan boyut. `size` diskteki
+    # gerçek boyut olduğu için ikisinin farkı = dosya diskte kısalmış.
+    recorded_size: int = field(default=0, compare=False)
+
+    def truncated(self) -> bool:
+        """Dosya, yüklendiği andakinden KISA mı? (bozulma işareti)"""
+        return bool(self.recorded_size) and self.size != self.recorded_size
 
     def public(self) -> dict:
         return {
@@ -134,20 +141,35 @@ class UploadCache:
                 boyut = data_path.stat().st_size
             except OSError:
                 continue
+            # Boyut olarak DISKTEKI gerçek boyutu alıyoruz.
+            #
+            # Eskiden meta.json'daki değer tercih ediliyordu; bu, yarım
+            # kalmış ya da bozulmuş bir dosyayı "tam boyutlu" gösterip
+            # arızayı GİZLİYORDU: arayüz 784 MB yazarken diskteki dosya
+            # eksik olabiliyordu. Fark varsa kaydı işaretliyoruz ki
+            # derleme başlamadan önce anlaşılır bir hata verilebilsin.
+            meta_boyut = int(meta.get("recorded_size") or meta.get("size") or 0)
             self._entries[child.name] = CachedUpload(
                 id=child.name,
                 name=safe_display_name(str(meta.get("name") or _DATA_NAME)),
-                size=int(meta.get("size") or boyut),
+                size=boyut,
                 sha256=str(meta.get("sha256") or ""),
                 created_at=float(meta.get("created_at") or time.time()),
                 last_used=float(meta.get("last_used") or time.time()),
                 uses=int(meta.get("uses") or 0),
+                recorded_size=meta_boyut,
             )
 
     def _write_meta(self, entry: CachedUpload) -> None:
+        # `recorded_size` AYRI yazılıyor: `size` diskteki güncel boyut
+        # olduğu için, bozulmuş bir dosyanın meta'sı yeniden yazıldığında
+        # (ör. her kullanımda) doğru boyut kaybolurdu — ve dosyanın
+        # kısaldığını gösteren tek kanıt silinirdi.
+        veri = dict(entry.public())
+        veri["recorded_size"] = entry.recorded_size or entry.size
         try:
             (self._dir(entry.id) / _META_NAME).write_text(
-                json.dumps(entry.public(), ensure_ascii=False, indent=2),
+                json.dumps(veri, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         except OSError:
@@ -228,6 +250,18 @@ class UploadCache:
 
         data_path = self._dir(entry_id) / _DATA_NAME
         part_path.replace(data_path)
+        # Yeniden adlandırmayı da diske indir. Kalıcı disk (Storage
+        # Buckets) bir ağ birimi; konteyner beklenmedik şekilde kapanırsa
+        # yalnızca bellekte duran bir değişiklik KAYBOLUR ve geriye
+        # yarım yazılmış bir dosya kalır.
+        try:
+            dir_fd = os.open(str(self._dir(entry_id)), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
 
         simdi = time.time()
         entry = CachedUpload(
@@ -237,6 +271,7 @@ class UploadCache:
             sha256=sha256,
             created_at=simdi,
             last_used=simdi,
+            recorded_size=boyut,
         )
         with self._lock:
             self._entries[entry_id] = entry

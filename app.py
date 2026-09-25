@@ -2453,11 +2453,49 @@ def _execute_build(
         )
     else:
         job.log("Proje ZIP dosyası açılıyor…")
+    # Açmadan ÖNCE denetle: bozuksa sebebini kanıtlarıyla söyleyebilelim.
+    saglik = _zip_sagligi(req.zip_path)
+    if not saglik.ok:
+        job.log(
+            "Hata: Önbellekteki proje dosyası açılabilir bir ZIP arşivi "
+            "değil.\n" + "\n".join(_bozuk_zip_teshisi(kaynak, req.zip_path, saglik))
+        )
+        # Bozuk girdiyi önbellekte BIRAKMIYORUZ: kullanıcı aynı bozuk
+        # dosyayla tekrar tekrar denemesin.
+        if req.zip_cached_id:
+            # "Kullanımda" işaretini bırakıyoruz ki silinebilsin.
+            # `zip_cached_id` bilerek DEĞİŞTİRİLMİYOR: run_build'in
+            # kapanış bloğu tekrar release çağıracak, o da artık
+            # olmayan bir girdi için zararsız biçimde hiçbir şey
+            # yapmıyor. Kimliği boşaltsaydık kapanış bloğu bu kez
+            # dosyayı "geçici girdi" sanıp silmeye çalışırdı.
+            UPLOADS.release(req.zip_cached_id)
+            silindi = UPLOADS.remove(req.zip_cached_id)
+            job.log(
+                "Bozuk girdi önbellekten çıkarıldı; projeyi yeniden yükleyin."
+                if silindi else
+                "Bozuk girdi önbellekten çıkarılamadı; listeden elle silin."
+            )
+        job.status = "error"
+        return
+
+    job.log(
+        f"ZIP doğrulandı: {saglik.girdi_sayisi:,} girdi, "
+        f"{saglik.boyut / (1024 * 1024):.1f} MB."
+    )
+
     try:
         with zipfile.ZipFile(req.zip_path) as zf:
             zf.extractall(project_extract_dir)
-    except zipfile.BadZipFile:
-        job.log("Hata: Yüklenen dosya geçerli bir ZIP arşivi değil.")
+    except zipfile.BadZipFile as exc:
+        job.log(f"Hata: ZIP açılırken bozuldu: {exc}")
+        job.status = "error"
+        return
+    except OSError as exc:
+        job.log(
+            f"Hata: ZIP açılamadı: {exc}\n"
+            "Disk dolmuş olabilir; Space'i yeniden başlatıp tekrar deneyin."
+        )
         job.status = "error"
         return
 
@@ -3271,6 +3309,117 @@ async def _save_upload(upload: Optional[UploadFile], suffix: str) -> Optional[Pa
     return path
 
 
+@dataclass
+class ZipSagligi:
+    """Bir ZIP dosyasının gerçekten açılabilir olup olmadığının sonucu."""
+
+    ok: bool
+    girdi_sayisi: int = 0
+    hata: str = ""
+    boyut: int = 0
+
+
+def _zip_sagligi(path: Path) -> ZipSagligi:
+    """
+    ZIP'i GERÇEKTEN açarak denetler.
+
+    Neden `zipfile.is_zipfile` yetmiyor: o fonksiyon yalnızca dosyanın
+    SONUNDAKİ "merkezi dizin sonu" (EOCD) kaydını arar. Merkezi dizinin
+    KENDİSİ bozuksa — dosya doğru uzunlukta ama içindeki bazı bloklar
+    sıfırlanmışsa — `is_zipfile` yine True döner, ama `ZipFile(...)`
+    açılırken "Bad magic number for central directory" ile patlar.
+
+    Bu, ölçülerek doğrulandı: merkezi dizini bozulmuş bir dosyada
+    `is_zipfile` True, `ZipFile` ise BadZipFile veriyor. Yükleme bu
+    yüzden "başarılı" görünüp derleme "geçerli bir ZIP değil" diyordu.
+
+    Artık yükleme anında da, derleme başlarken de bu denetim yapılıyor.
+    """
+    try:
+        boyut = path.stat().st_size
+    except OSError as exc:
+        return ZipSagligi(ok=False, hata=f"dosya okunamadı: {exc}")
+
+    if boyut == 0:
+        return ZipSagligi(ok=False, hata="dosya boş (0 bayt)", boyut=0)
+
+    try:
+        with zipfile.ZipFile(path) as zf:
+            adlar = zf.namelist()
+    except zipfile.BadZipFile as exc:
+        return ZipSagligi(ok=False, hata=f"ZIP dizini okunamadı: {exc}", boyut=boyut)
+    except OSError as exc:
+        return ZipSagligi(ok=False, hata=f"dosya okunamadı: {exc}", boyut=boyut)
+
+    if not adlar:
+        return ZipSagligi(ok=False, hata="ZIP boş (hiç dosya yok)", boyut=boyut)
+
+    return ZipSagligi(ok=True, girdi_sayisi=len(adlar), boyut=boyut)
+
+
+def _dosya_sha256(path: Path) -> str:
+    """Dosyanın SHA-256'sını diskten okuyarak hesaplar."""
+    hasher = hashlib.sha256()
+    try:
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(4 * 1024 * 1024), b""):
+                hasher.update(chunk)
+    except OSError:
+        return ""
+    return hasher.hexdigest()
+
+
+def _bozuk_zip_teshisi(entry: Optional[upload_cache.CachedUpload], path: Path,
+                       saglik: ZipSagligi) -> list[str]:
+    """
+    Bozuk bir önbellek dosyası için ELDE EDİLEBİLİR tüm kanıtı toplar.
+
+    Amaç, "geçerli bir ZIP değil" gibi tek satırlık bir çıkmaz yerine
+    sorunun NEREDE olduğunu ayırt etmek: dosya diskte mi kısaldı, içeriği
+    mi değişti, yoksa hiç geçerli olmadan mı yüklendi.
+    """
+    satirlar = [f"  - hata: {saglik.hata}"]
+    satirlar.append(f"  - diskteki boyut: {saglik.boyut:,} bayt")
+
+    if entry is not None:
+        if entry.recorded_size:
+            satirlar.append(
+                f"  - yüklenirken kaydedilen boyut: {entry.recorded_size:,} bayt"
+            )
+            if entry.recorded_size != saglik.boyut:
+                satirlar.append(
+                    "  - BOYUT UYUŞMUYOR: dosya yüklendikten SONRA diskte "
+                    "değişmiş/kısalmış."
+                )
+        if entry.sha256:
+            simdiki = _dosya_sha256(path)
+            if not simdiki:
+                satirlar.append("  - SHA-256 yeniden hesaplanamadı (okuma hatası).")
+            elif simdiki == entry.sha256:
+                satirlar.append(
+                    "  - SHA-256 AYNI: dosya diskte bozulmamış. Demek ki "
+                    "yüklenen dosyanın kendisi zaten geçerli bir ZIP değildi."
+                )
+            else:
+                satirlar.append(
+                    f"  - SHA-256 FARKLI (kayıtlı {entry.sha256[:16]}…, "
+                    f"şimdi {simdiki[:16]}…): dosyanın içeriği yüklendikten "
+                    "sonra DEĞİŞMİŞ. Bu neredeyse her zaman kalıcı diskin "
+                    "dolması ya da yazmanın yarıda kalması demektir."
+                )
+
+    try:
+        kullanim = shutil.disk_usage(str(path.parent))
+        satirlar.append(
+            f"  - önbellek diski: {kullanim.free / (1024 ** 3):.2f} GB boş / "
+            f"{kullanim.total / (1024 ** 3):.2f} GB toplam"
+        )
+    except OSError:
+        pass
+
+    return satirlar
+
+
 async def _stream_to_cache(upload: UploadFile) -> upload_cache.CachedUpload:
     """
     Yüklenen ZIP'i önbelleğe alır ve SHA-256'sını hesaplar.
@@ -3289,6 +3438,18 @@ async def _stream_to_cache(upload: UploadFile) -> upload_cache.CachedUpload:
                     break
                 hasher.update(chunk)
                 target.write(chunk)
+            # Baytları GERÇEKTEN diske indir.
+            #
+            # Kalıcı disk (Storage Buckets) bir ağ birimi. Yalnızca
+            # işletim sisteminin önbelleğinde duran veri, konteyner
+            # beklenmedik şekilde kapanırsa kaybolur; geriye doğru
+            # uzunlukta ama içi kısmen sıfırlanmış bir dosya kalır.
+            # Böyle bir dosya `is_zipfile`ı geçip `ZipFile`da patlıyor.
+            target.flush()
+            try:
+                os.fsync(target.fileno())
+            except OSError:
+                pass
     except BaseException:
         # Yarıda kesilen yükleme önbellekte bozuk bir ZIP bırakmasın.
         UPLOADS.abort(entry_id)
@@ -3318,11 +3479,28 @@ async def api_upload(project_zip: UploadFile = File(...)) -> JSONResponse:
         UPLOADS.remove(entry.id)
         raise HTTPException(status_code=400, detail="Yüklenen dosya boş.")
 
-    if not zipfile.is_zipfile(UPLOADS.path_of(entry.id)):
+    # `is_zipfile` YETMİYOR: yalnızca dosyanın sonundaki kaydı arıyor ve
+    # merkezi dizini bozuk bir dosyayı kabul ediyor. Böyle bir dosya
+    # yüklemede "başarılı" görünüp derlemede "geçerli bir ZIP değil"
+    # diyordu. Artık burada gerçekten açıyoruz.
+    saglik = _zip_sagligi(UPLOADS.path_of(entry.id))
+    if not saglik.ok:
+        teshis = _bozuk_zip_teshisi(entry, UPLOADS.path_of(entry.id), saglik)
+        print(
+            "Yükleme reddedildi (bozuk ZIP):\n" + "\n".join(teshis),
+            flush=True,
+        )
         UPLOADS.remove(entry.id)
         raise HTTPException(
             status_code=400,
-            detail="Yüklenen dosya geçerli bir ZIP arşivi değil.",
+            detail=(
+                "Yüklenen dosya açılabilir bir ZIP arşivi değil — "
+                f"{saglik.hata}. Dosya sunucuya "
+                f"{saglik.boyut / (1024 * 1024):.1f} MB olarak ulaştı. "
+                "Yükleme yarıda kalmış olabilir; tekrar deneyin. Sorun "
+                "sürerse ZIP'i bilgisayarınızda açıp bozuk olmadığından "
+                "emin olun."
+            ),
         )
 
     return JSONResponse({"upload": entry.public()})
